@@ -56,11 +56,45 @@ type PortfolioSim = {
   notes: string
 }
 
+type Watchlist = { symbols: string[] }
+type AlertFlip = { symbol: string; from_outlook: string; to_outlook: string; up_probability: number }
+type AlertsCheck = { checked_at: string; risk_profile: Risk; flips: AlertFlip[] }
+
 const API_BASE = process.env.API_BASE_URL || 'http://127.0.0.1:8000'
 
-async function getTrends(risk: Risk): Promise<Trend[]> {
+async function mutateWatchlist(addSymbol?: string, removeSymbol?: string) {
+  if (addSymbol) {
+    await fetch(`${API_BASE}/v1/watchlist/${encodeURIComponent(addSymbol)}`, { method: 'POST', cache: 'no-store' })
+  }
+  if (removeSymbol) {
+    await fetch(`${API_BASE}/v1/watchlist/${encodeURIComponent(removeSymbol)}`, { method: 'DELETE', cache: 'no-store' })
+  }
+}
+
+async function getWatchlist(): Promise<Watchlist> {
   try {
-    const r = await fetch(`${API_BASE}/v1/trends?symbols=BTC,ETH,SOL&risk=${risk}`, { cache: 'no-store' })
+    const r = await fetch(`${API_BASE}/v1/watchlist`, { cache: 'no-store' })
+    if (!r.ok) return { symbols: ['BTCUSDT', 'ETHUSDT', 'SOLUSDT'] }
+    return await r.json()
+  } catch {
+    return { symbols: ['BTCUSDT', 'ETHUSDT', 'SOLUSDT'] }
+  }
+}
+
+async function getAlerts(risk: Risk): Promise<AlertsCheck | null> {
+  try {
+    const r = await fetch(`${API_BASE}/v1/alerts/check?risk=${risk}`, { cache: 'no-store' })
+    if (!r.ok) return null
+    return await r.json()
+  } catch {
+    return null
+  }
+}
+
+async function getTrends(risk: Risk, symbols: string[]): Promise<Trend[]> {
+  try {
+    const csv = symbols.map((s) => s.replace('USDT', '')).join(',')
+    const r = await fetch(`${API_BASE}/v1/trends?symbols=${csv}&risk=${risk}`, { cache: 'no-store' })
     if (!r.ok) return []
     return await r.json()
   } catch {
@@ -68,9 +102,10 @@ async function getTrends(risk: Risk): Promise<Trend[]> {
   }
 }
 
-async function getBacktests(lookback: number, risk: Risk): Promise<Backtest[]> {
+async function getBacktests(lookback: number, risk: Risk, symbols: string[]): Promise<Backtest[]> {
   try {
-    const r = await fetch(`${API_BASE}/v1/backtest?symbols=BTC,ETH,SOL&lookback=${lookback}&risk=${risk}`, { cache: 'no-store' })
+    const csv = symbols.map((s) => s.replace('USDT', '')).join(',')
+    const r = await fetch(`${API_BASE}/v1/backtest?symbols=${csv}&lookback=${lookback}&risk=${risk}`, { cache: 'no-store' })
     if (!r.ok) return []
     return await r.json()
   } catch {
@@ -111,7 +146,6 @@ function EquityChart({ data }: { data: EquityPoint[] }) {
   const w = 760
   const h = 220
   const pad = 20
-
   const all = data.flatMap((d) => [d.strategy, d.buy_hold])
   const minV = Math.min(...all)
   const maxV = Math.max(...all)
@@ -135,7 +169,11 @@ function EquityChart({ data }: { data: EquityPoint[] }) {
   )
 }
 
-export default async function Home({ searchParams }: { searchParams?: { lookback?: string; risk?: string; capital?: string } }) {
+export default async function Home({
+  searchParams,
+}: {
+  searchParams?: { lookback?: string; risk?: string; capital?: string; addSymbol?: string; removeSymbol?: string }
+}) {
   const lookback = Number(searchParams?.lookback || '240')
   const safeLookback = [120, 240, 360, 720].includes(lookback) ? lookback : 240
   const risk = (searchParams?.risk || 'moderate') as Risk
@@ -143,11 +181,16 @@ export default async function Home({ searchParams }: { searchParams?: { lookback
   const capital = Number(searchParams?.capital || '10000')
   const safeCapital = Number.isFinite(capital) && capital >= 100 ? capital : 10000
 
-  const [trends, backtests, explain, sim] = await Promise.all([
-    getTrends(safeRisk),
-    getBacktests(safeLookback, safeRisk),
+  await mutateWatchlist(searchParams?.addSymbol, searchParams?.removeSymbol)
+  const watchlist = await getWatchlist()
+  const symbols = watchlist.symbols.length ? watchlist.symbols : ['BTCUSDT', 'ETHUSDT', 'SOLUSDT']
+
+  const [trends, backtests, explain, sim, alerts] = await Promise.all([
+    getTrends(safeRisk, symbols),
+    getBacktests(safeLookback, safeRisk, symbols),
     getExplain('BTC', safeRisk),
     getPortfolioSim('BTC', safeRisk, Math.max(240, safeLookback), safeCapital),
+    getAlerts(safeRisk),
   ])
 
   const primary = backtests[0]
@@ -155,7 +198,7 @@ export default async function Home({ searchParams }: { searchParams?: { lookback
   return (
     <main style={{ padding: 24, fontFamily: 'system-ui' }}>
       <h1>Crypto Trend Intelligence</h1>
-      <p>Live signals + multi-asset backtest analytics + AI explanation + portfolio simulator.</p>
+      <p>Live signals + backtests + AI explanation + portfolio simulator + watchlist alerts.</p>
 
       <form style={{ marginBottom: 14, display: 'flex', gap: 12, flexWrap: 'wrap' }}>
         <label>
@@ -185,12 +228,38 @@ export default async function Home({ searchParams }: { searchParams?: { lookback
         <button type="submit">Apply</button>
       </form>
 
+      <section style={{ marginTop: 10, border: '1px solid #ddd', borderRadius: 12, padding: 14 }}>
+        <h2 style={{ marginTop: 0 }}>Watchlist</h2>
+        <p>{symbols.join(', ')}</p>
+        <form style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+          <input name="addSymbol" placeholder="Add symbol (e.g. ADA)" />
+          <input type="hidden" name="lookback" value={safeLookback} />
+          <input type="hidden" name="risk" value={safeRisk} />
+          <input type="hidden" name="capital" value={safeCapital} />
+          <button type="submit">Add</button>
+        </form>
+        <p style={{ marginTop: 8 }}>Remove: {symbols.map((s) => (
+          <a key={s} href={`?lookback=${safeLookback}&risk=${safeRisk}&capital=${safeCapital}&removeSymbol=${s.replace('USDT','')}`} style={{ marginRight: 10 }}>{s}</a>
+        ))}</p>
+      </section>
+
+      <section style={{ marginTop: 10, border: '1px solid #ddd', borderRadius: 12, padding: 14 }}>
+        <h2 style={{ marginTop: 0 }}>Signal Flip Alerts</h2>
+        {!alerts ? <p>Alerts unavailable.</p> : alerts.flips.length === 0 ? <p>No flips detected on this check.</p> : (
+          <ul>
+            {alerts.flips.map((f) => (
+              <li key={f.symbol}><strong>{f.symbol}</strong>: {f.from_outlook} → {f.to_outlook} ({pct(f.up_probability)})</li>
+            ))}
+          </ul>
+        )}
+      </section>
+
       {trends.length === 0 ? (
         <p style={{ color: '#a00' }}>
           API not reachable yet. Start backend: <code>uvicorn services.api.app.main:app --reload --port 8000</code>
         </p>
       ) : (
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit,minmax(260px,1fr))', gap: 12 }}>
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit,minmax(260px,1fr))', gap: 12, marginTop: 12 }}>
           {trends.map((t) => (
             <section key={t.symbol} style={{ border: '1px solid #ddd', borderRadius: 12, padding: 14 }}>
               <h3 style={{ margin: 0 }}>{t.symbol}</h3>

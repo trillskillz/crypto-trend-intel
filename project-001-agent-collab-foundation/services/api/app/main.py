@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import json
 import math
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Literal
 
 import httpx
@@ -14,6 +16,10 @@ BINANCE_BASE_URL = "https://api.binance.com"
 INTERVAL = "1h"
 LIMIT = 1000
 RiskProfile = Literal["conservative", "moderate", "aggressive"]
+
+STATE_DIR = Path(__file__).resolve().parents[1] / "state"
+WATCHLIST_FILE = STATE_DIR / "watchlist.json"
+ALERTS_FILE = STATE_DIR / "alerts_state.json"
 
 
 class TrendResponse(BaseModel):
@@ -72,9 +78,79 @@ class PortfolioSimResponse(BaseModel):
     notes: str
 
 
+class WatchlistResponse(BaseModel):
+    symbols: list[str]
+
+
+class AlertFlip(BaseModel):
+    symbol: str
+    from_outlook: str
+    to_outlook: str
+    up_probability: float
+
+
+class AlertsCheckResponse(BaseModel):
+    risk_profile: RiskProfile
+    checked_at: str
+    flips: list[AlertFlip]
+
+
 @app.get("/health")
 def health():
     return {"ok": True, "service": "crypto-trend-api"}
+
+
+@app.get("/v1/watchlist", response_model=WatchlistResponse)
+def get_watchlist():
+    return WatchlistResponse(symbols=_load_watchlist())
+
+
+@app.post("/v1/watchlist/{symbol}", response_model=WatchlistResponse)
+def add_watchlist(symbol: str):
+    pair = _to_pair(symbol)
+    current = _load_watchlist()
+    if pair not in current:
+        current.append(pair)
+        _save_watchlist(current)
+    return WatchlistResponse(symbols=current)
+
+
+@app.delete("/v1/watchlist/{symbol}", response_model=WatchlistResponse)
+def remove_watchlist(symbol: str):
+    pair = _to_pair(symbol)
+    current = [s for s in _load_watchlist() if s != pair]
+    _save_watchlist(current)
+    return WatchlistResponse(symbols=current)
+
+
+@app.get("/v1/alerts/check", response_model=AlertsCheckResponse)
+def alerts_check(risk: RiskProfile = Query(default="moderate")):
+    symbols = _load_watchlist()
+    prev = _load_json(ALERTS_FILE, default={})
+    flips: list[AlertFlip] = []
+    next_state: dict[str, str] = {}
+
+    for symbol in symbols:
+        t = trend(symbol, risk=risk)
+        now = _outlook_from_probability(t.up_probability)
+        old = prev.get(symbol)
+        if old and old != now:
+            flips.append(
+                AlertFlip(
+                    symbol=symbol,
+                    from_outlook=old,
+                    to_outlook=now,
+                    up_probability=round(t.up_probability, 4),
+                )
+            )
+        next_state[symbol] = now
+
+    _save_json(ALERTS_FILE, next_state)
+    return AlertsCheckResponse(
+        risk_profile=risk,
+        checked_at=datetime.now(UTC).isoformat(),
+        flips=flips,
+    )
 
 
 @app.get("/v1/trends/{symbol}", response_model=TrendResponse)
@@ -321,6 +397,47 @@ def portfolio_simulate(
         max_drawdown=round(max_dd, 4),
         notes="Simple long-only simulation with risk-based sizing and stop/take exits.",
     )
+
+
+def _load_json(path: Path, default):
+    try:
+        if not path.exists():
+            return default
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return default
+
+
+def _save_json(path: Path, data) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+
+
+def _load_watchlist() -> list[str]:
+    data = _load_json(WATCHLIST_FILE, default=["BTCUSDT", "ETHUSDT", "SOLUSDT"])
+    out = []
+    for s in data:
+        pair = _to_pair(str(s))
+        if pair not in out:
+            out.append(pair)
+    return out
+
+
+def _save_watchlist(symbols: list[str]) -> None:
+    cleaned = []
+    for s in symbols:
+        pair = _to_pair(s)
+        if pair not in cleaned:
+            cleaned.append(pair)
+    _save_json(WATCHLIST_FILE, cleaned)
+
+
+def _outlook_from_probability(p: float) -> str:
+    if p >= 0.56:
+        return "bullish"
+    if p <= 0.44:
+        return "bearish"
+    return "neutral"
 
 
 def _to_pair(symbol: str) -> str:
