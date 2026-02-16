@@ -62,6 +62,7 @@ type Watchlist = { symbols: string[] }
 type AlertFlip = { symbol: string; from_outlook: string; to_outlook: string; up_probability: number }
 type AlertsCheck = { checked_at: string; risk_profile: Risk; flips: AlertFlip[] }
 type UniverseMeta = { total: number }
+type UniverseItem = { id: string; symbol: string; name: string }
 
 const API_BASE = process.env.API_BASE_URL || 'http://127.0.0.1:8000'
 
@@ -95,6 +96,19 @@ async function getUniverseMeta(): Promise<UniverseMeta | null> {
     return { total: Number(j.total || 0) }
   } catch {
     return null
+  }
+}
+
+async function searchUniverse(q: string): Promise<UniverseItem[]> {
+  const query = q.trim()
+  if (!query) return []
+  try {
+    const r = await fetch(`${API_BASE}/v1/universe/coingecko?search=${encodeURIComponent(query)}&limit=20`, { cache: 'no-store' })
+    if (!r.ok) return []
+    const j = await r.json()
+    return (j.items || []) as UniverseItem[]
+  } catch {
+    return []
   }
 }
 
@@ -245,7 +259,7 @@ function Kpi({ label, value, sub }: { label: string; value: string; sub?: string
 export default async function Home({
   searchParams,
 }: {
-  searchParams?: { lookback?: string; risk?: string; capital?: string; addSymbol?: string; removeSymbol?: string; importAll?: string }
+  searchParams?: { lookback?: string; risk?: string; capital?: string; addSymbol?: string; removeSymbol?: string; importAll?: string; q?: string; active?: string }
 }) {
   const lookback = Number(searchParams?.lookback || '240')
   const safeLookback = [120, 240, 360, 720].includes(lookback) ? lookback : 240
@@ -253,19 +267,23 @@ export default async function Home({
   const safeRisk: Risk = ['conservative', 'moderate', 'aggressive'].includes(risk) ? risk : 'moderate'
   const capital = Number(searchParams?.capital || '10000')
   const safeCapital = Number.isFinite(capital) && capital >= 100 ? capital : 10000
+  const active = Number(searchParams?.active || '24')
+  const safeActive = [12, 24, 50, 100].includes(active) ? active : 24
+  const q = (searchParams?.q || '').trim()
 
   await mutateWatchlist(searchParams?.addSymbol, searchParams?.removeSymbol, searchParams?.importAll)
   const watchlist = await getWatchlist()
   const symbols = watchlist.symbols.length ? watchlist.symbols : ['BTCUSDT', 'ETHUSDT', 'SOLUSDT']
-  const activeSymbols = symbols.slice(0, 24)
+  const activeSymbols = symbols.slice(0, safeActive)
 
-  const [trends, backtests, explain, sim, alerts, universe] = await Promise.all([
+  const [trends, backtests, explain, sim, alerts, universe, universeMatches] = await Promise.all([
     getTrends(safeRisk, activeSymbols),
     getBacktests(safeLookback, safeRisk, activeSymbols),
     getExplain('BTC', safeRisk),
     getPortfolioSim('BTC', safeRisk, Math.max(240, safeLookback), safeCapital),
     getAlerts(safeRisk),
     getUniverseMeta(),
+    searchUniverse(q),
   ])
 
   const primary = backtests[0]
@@ -315,6 +333,16 @@ export default async function Home({
               <input name="capital" type="number" min={100} step={100} defaultValue={safeCapital} style={inputStyle} />
             </label>
 
+            <label style={{ display: 'grid', gap: 6 }}>
+              <span style={{ color: '#94a3b8', fontSize: 12 }}>Live Analysis Size</span>
+              <select name="active" defaultValue={String(safeActive)} style={inputStyle}>
+                <option value="12">Top 12</option>
+                <option value="24">Top 24</option>
+                <option value="50">Top 50</option>
+                <option value="100">Top 100</option>
+              </select>
+            </label>
+
             <button type="submit" style={primaryButton}>Apply Settings</button>
           </form>
         </section>
@@ -338,16 +366,45 @@ export default async function Home({
             <input type="hidden" name="lookback" value={safeLookback} />
             <input type="hidden" name="risk" value={safeRisk} />
             <input type="hidden" name="capital" value={safeCapital} />
+            <input type="hidden" name="active" value={safeActive} />
             <button type="submit" style={primaryButton}>Add</button>
-            <a href={`?lookback=${safeLookback}&risk=${safeRisk}&capital=${safeCapital}&importAll=1`} style={{ ...primaryButton, textDecoration: 'none', display: 'inline-flex', alignItems: 'center' }}>Import all from CoinGecko</a>
+            <a href={`?lookback=${safeLookback}&risk=${safeRisk}&capital=${safeCapital}&active=${safeActive}&importAll=1`} style={{ ...primaryButton, textDecoration: 'none', display: 'inline-flex', alignItems: 'center' }}>Import all from CoinGecko</a>
           </form>
           <p style={{ marginTop: 8, marginBottom: 6, color: '#94a3b8', fontSize: 12 }}>Tip: importing the full universe is huge and can slow trend/alert refreshes.</p>
           <div style={{ marginTop: 10, color: '#94a3b8', fontSize: 13 }}>
             Remove:&nbsp;
             {symbols.slice(0, 20).map((s) => (
-              <a key={s} href={`?lookback=${safeLookback}&risk=${safeRisk}&capital=${safeCapital}&removeSymbol=${s.replace('USDT', '')}`} style={linkChip}>{s}</a>
+              <a key={s} href={`?lookback=${safeLookback}&risk=${safeRisk}&capital=${safeCapital}&active=${safeActive}&removeSymbol=${s.replace('USDT', '')}`} style={linkChip}>{s}</a>
             ))}
           </div>
+        </section>
+
+        <section style={{ marginTop: 14, border: '1px solid rgba(148,163,184,.25)', borderRadius: 14, padding: 14, background: 'rgba(15,23,42,.5)' }}>
+          <h2 style={h2}>Coin Search (CoinGecko Universe)</h2>
+          <form style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+            <input name="q" defaultValue={q} placeholder="Search by symbol, id, or name" style={{ ...inputStyle, minWidth: 280 }} />
+            <input type="hidden" name="lookback" value={safeLookback} />
+            <input type="hidden" name="risk" value={safeRisk} />
+            <input type="hidden" name="capital" value={safeCapital} />
+            <input type="hidden" name="active" value={safeActive} />
+            <button type="submit" style={primaryButton}>Search</button>
+          </form>
+          {q ? (
+            universeMatches.length ? (
+              <div style={{ marginTop: 10, display: 'grid', gridTemplateColumns: 'repeat(auto-fit,minmax(240px,1fr))', gap: 8 }}>
+                {universeMatches.map((c) => (
+                  <a
+                    key={`${c.id}-${c.symbol}`}
+                    href={`?lookback=${safeLookback}&risk=${safeRisk}&capital=${safeCapital}&active=${safeActive}&addSymbol=${encodeURIComponent(c.symbol)}`}
+                    style={{ border: '1px solid rgba(148,163,184,.25)', borderRadius: 10, padding: 10, textDecoration: 'none', color: '#cbd5e1' }}
+                  >
+                    <strong>{c.symbol.toUpperCase()}</strong> • {c.name}
+                    <div style={{ color: '#64748b', fontSize: 12 }}>{c.id}</div>
+                  </a>
+                ))}
+              </div>
+            ) : <p style={{ color: '#94a3b8', marginTop: 8 }}>No matches found.</p>
+          ) : <p style={{ color: '#94a3b8', marginTop: 8 }}>Search and one-click add assets from the full CoinGecko universe.</p>}
         </section>
 
         <section style={{ marginTop: 14, border: '1px solid rgba(148,163,184,.25)', borderRadius: 14, padding: 14, background: 'rgba(15,23,42,.5)' }}>
