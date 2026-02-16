@@ -8,7 +8,7 @@ import httpx
 from fastapi import FastAPI, HTTPException, Query
 from pydantic import BaseModel
 
-app = FastAPI(title="Crypto Trend API", version="0.5.0")
+app = FastAPI(title="Crypto Trend API", version="0.6.0")
 
 BINANCE_BASE_URL = "https://api.binance.com"
 INTERVAL = "1h"
@@ -55,6 +55,21 @@ class ExplainResponse(BaseModel):
     drivers: list[str]
     caution: list[str]
     summary: str
+
+
+class PortfolioSimResponse(BaseModel):
+    symbol: str
+    risk_profile: RiskProfile
+    initial_capital: float
+    position_size_pct: float
+    stop_loss_pct: float
+    take_profit_pct: float
+    trades: int
+    win_rate: float
+    final_equity: float
+    pnl_pct: float
+    max_drawdown: float
+    notes: str
 
 
 @app.get("/health")
@@ -224,6 +239,90 @@ def explain(
     )
 
 
+@app.get("/v1/portfolio/simulate/{symbol}", response_model=PortfolioSimResponse)
+def portfolio_simulate(
+    symbol: str,
+    lookback: int = Query(default=360, ge=120, le=900),
+    risk: RiskProfile = Query(default="moderate"),
+    initial_capital: float = Query(default=10_000, ge=100),
+):
+    pair = _to_pair(symbol)
+    klines = _fetch_klines(pair)
+    if len(klines) < lookback:
+        raise HTTPException(status_code=502, detail="Not enough market data for requested lookback")
+
+    closes = [k["close"] for k in klines[-lookback:]]
+    pos_size, stop_loss, take_profit = _risk_params(risk)
+
+    equity = initial_capital
+    peak = equity
+    max_dd = 0.0
+    wins = 0
+    trades = 0
+
+    i = 60
+    while i < len(closes) - 2:
+        hist = closes[: i + 1]
+        m = _momentum_score(hist)
+        v = _volatility(hist)
+        p_up = _up_probability(m, v)
+
+        if p_up < _entry_threshold(risk):
+            i += 1
+            continue
+
+        entry = closes[i]
+        capital_at_risk = equity * pos_size
+        trades += 1
+
+        exit_ret = 0.0
+        exited = False
+        for j in range(i + 1, min(i + 25, len(closes))):
+            ret = (closes[j] / entry) - 1.0
+            if ret <= -stop_loss:
+                exit_ret = -stop_loss
+                exited = True
+                break
+            if ret >= take_profit:
+                exit_ret = take_profit
+                exited = True
+                break
+
+        if not exited:
+            # time-based exit
+            j = min(i + 24, len(closes) - 1)
+            exit_ret = (closes[j] / entry) - 1.0
+
+        pnl = capital_at_risk * exit_ret
+        equity += pnl
+        if pnl > 0:
+            wins += 1
+
+        peak = max(peak, equity)
+        dd = (equity / peak) - 1.0
+        max_dd = min(max_dd, dd)
+
+        i = j + 1
+
+    win_rate = (wins / trades) if trades else 0.0
+    pnl_pct = (equity / initial_capital) - 1.0
+
+    return PortfolioSimResponse(
+        symbol=pair,
+        risk_profile=risk,
+        initial_capital=round(initial_capital, 2),
+        position_size_pct=round(pos_size, 4),
+        stop_loss_pct=round(stop_loss, 4),
+        take_profit_pct=round(take_profit, 4),
+        trades=trades,
+        win_rate=round(win_rate, 4),
+        final_equity=round(equity, 2),
+        pnl_pct=round(pnl_pct, 4),
+        max_drawdown=round(max_dd, 4),
+        notes="Simple long-only simulation with risk-based sizing and stop/take exits.",
+    )
+
+
 def _to_pair(symbol: str) -> str:
     pair = symbol.upper()
     return pair if pair.endswith("USDT") else f"{pair}USDT"
@@ -282,6 +381,15 @@ def _entry_threshold(risk: RiskProfile) -> float:
     if risk == "aggressive":
         return 0.52
     return 0.55
+
+
+def _risk_params(risk: RiskProfile) -> tuple[float, float, float]:
+    # position_size, stop_loss, take_profit
+    if risk == "conservative":
+        return (0.15, 0.025, 0.05)
+    if risk == "aggressive":
+        return (0.35, 0.05, 0.10)
+    return (0.25, 0.035, 0.07)
 
 
 def _signal_explanation(momentum: float, vol: float, regime: str, risk: RiskProfile) -> str:

@@ -41,6 +41,21 @@ type Explain = {
   summary: string
 }
 
+type PortfolioSim = {
+  symbol: string
+  risk_profile: Risk
+  initial_capital: number
+  position_size_pct: number
+  stop_loss_pct: number
+  take_profit_pct: number
+  trades: number
+  win_rate: number
+  final_equity: number
+  pnl_pct: number
+  max_drawdown: number
+  notes: string
+}
+
 const API_BASE = process.env.API_BASE_URL || 'http://127.0.0.1:8000'
 
 async function getTrends(risk: Risk): Promise<Trend[]> {
@@ -66,6 +81,19 @@ async function getBacktests(lookback: number, risk: Risk): Promise<Backtest[]> {
 async function getExplain(symbol: string, risk: Risk): Promise<Explain | null> {
   try {
     const r = await fetch(`${API_BASE}/v1/explain/${symbol}?risk=${risk}`, { cache: 'no-store' })
+    if (!r.ok) return null
+    return await r.json()
+  } catch {
+    return null
+  }
+}
+
+async function getPortfolioSim(symbol: string, risk: Risk, lookback: number, capital: number): Promise<PortfolioSim | null> {
+  try {
+    const r = await fetch(
+      `${API_BASE}/v1/portfolio/simulate/${symbol}?risk=${risk}&lookback=${lookback}&initial_capital=${capital}`,
+      { cache: 'no-store' },
+    )
     if (!r.ok) return null
     return await r.json()
   } catch {
@@ -107,16 +135,19 @@ function EquityChart({ data }: { data: EquityPoint[] }) {
   )
 }
 
-export default async function Home({ searchParams }: { searchParams?: { lookback?: string; risk?: string } }) {
+export default async function Home({ searchParams }: { searchParams?: { lookback?: string; risk?: string; capital?: string } }) {
   const lookback = Number(searchParams?.lookback || '240')
   const safeLookback = [120, 240, 360, 720].includes(lookback) ? lookback : 240
   const risk = (searchParams?.risk || 'moderate') as Risk
   const safeRisk: Risk = ['conservative', 'moderate', 'aggressive'].includes(risk) ? risk : 'moderate'
+  const capital = Number(searchParams?.capital || '10000')
+  const safeCapital = Number.isFinite(capital) && capital >= 100 ? capital : 10000
 
-  const [trends, backtests, explain] = await Promise.all([
+  const [trends, backtests, explain, sim] = await Promise.all([
     getTrends(safeRisk),
     getBacktests(safeLookback, safeRisk),
     getExplain('BTC', safeRisk),
+    getPortfolioSim('BTC', safeRisk, Math.max(240, safeLookback), safeCapital),
   ])
 
   const primary = backtests[0]
@@ -124,7 +155,7 @@ export default async function Home({ searchParams }: { searchParams?: { lookback
   return (
     <main style={{ padding: 24, fontFamily: 'system-ui' }}>
       <h1>Crypto Trend Intelligence</h1>
-      <p>Live signals + multi-asset backtest analytics + AI explanation.</p>
+      <p>Live signals + multi-asset backtest analytics + AI explanation + portfolio simulator.</p>
 
       <form style={{ marginBottom: 14, display: 'flex', gap: 12, flexWrap: 'wrap' }}>
         <label>
@@ -144,6 +175,11 @@ export default async function Home({ searchParams }: { searchParams?: { lookback
             <option value="moderate">Moderate</option>
             <option value="aggressive">Aggressive</option>
           </select>
+        </label>
+
+        <label>
+          Capital:&nbsp;
+          <input name="capital" type="number" min={100} step={100} defaultValue={safeCapital} />
         </label>
 
         <button type="submit">Apply</button>
@@ -180,6 +216,25 @@ export default async function Home({ searchParams }: { searchParams?: { lookback
             <p><strong>Cautions</strong></p>
             <ul>{explain.caution.map((d, i) => <li key={i}>{d}</li>)}</ul>
           </>
+        )}
+      </section>
+
+      <section style={{ marginTop: 20, border: '1px solid #ddd', borderRadius: 12, padding: 14 }}>
+        <h2 style={{ marginTop: 0 }}>Portfolio Simulator (BTC)</h2>
+        {!sim ? (
+          <p>Simulator unavailable.</p>
+        ) : (
+          <ul>
+            <li><strong>Capital:</strong> ${sim.initial_capital.toLocaleString()}</li>
+            <li><strong>Position size:</strong> {pct(sim.position_size_pct)}</li>
+            <li><strong>Stop loss:</strong> {pct(sim.stop_loss_pct)}</li>
+            <li><strong>Take profit:</strong> {pct(sim.take_profit_pct)}</li>
+            <li><strong>Trades:</strong> {sim.trades}</li>
+            <li><strong>Win rate:</strong> {pct(sim.win_rate)}</li>
+            <li><strong>Final equity:</strong> ${sim.final_equity.toLocaleString()}</li>
+            <li><strong>PnL:</strong> {pct(sim.pnl_pct)}</li>
+            <li><strong>Max drawdown:</strong> {pct(sim.max_drawdown)}</li>
+          </ul>
         )}
       </section>
 
