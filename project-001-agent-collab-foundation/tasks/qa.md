@@ -1,4 +1,4 @@
 # QA Task Queue
-- [ ] Define acceptance criteria template.
-- [ ] Create test pyramid baseline (unit/integration/e2e targets).
-- [ ] Build release gate checklist for Phase 1.
+- [ ] Define test plan for data quality, model outputs, and UI reliability
+- [ ] Create synthetic-data regression suite for model pipeline
+- [ ] Add guardrails: no overconfident output without confidence interval

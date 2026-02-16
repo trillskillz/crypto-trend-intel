@@ -1,4 +1,5 @@
 # Ops Task Queue
-- [ ] Propose runtime profile for dev/staging/prod.
-- [ ] Define observability minimums (logs, alerts, health checks).
-- [ ] Draft backup/rollback expectations.
+- [ ] Build docker-compose for local full stack
+- [ ] Define secrets strategy (.env + vault-ready path)
+- [ ] Add observability baseline (latency, model drift, job failures)
+- [ ] Set backup/restore policy for DB + model artifacts

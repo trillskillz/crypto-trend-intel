@@ -1,4 +1,5 @@
 # Researcher Task Queue
-- [ ] Produce options matrix for stack decisions (speed vs reliability vs cost).
-- [ ] Define key unknowns and required user decisions.
-- [ ] Draft risk register with mitigations.
+- [ ] Evaluate model options: trend classification vs seq2seq forecasting
+- [ ] Define feature shortlist and ablation plan
+- [ ] Recommend evaluation metrics (AUC, F1, calibration, hit-rate)
+- [ ] Produce initial benchmark report template

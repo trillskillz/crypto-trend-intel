@@ -1,4 +1,5 @@
 # Builder Task Queue
-- [ ] Create implementation skeleton for the first product target once user confirms target.
-- [ ] Define coding standards + branch strategy.
-- [ ] Produce first executable milestone plan (M1/M2/M3).
+- [ ] Scaffold monorepo: apps/web, services/api, services/ingest, services/models
+- [ ] Build MVP dashboard shell (watchlist, forecast cards, signal timeline)
+- [ ] Implement auth + secure config handling
+- [ ] Add alert rule engine (threshold + trend flip)

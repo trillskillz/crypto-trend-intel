@@ -1,4 +1,4 @@
 # Comms Task Queue
-- [ ] Create status update template (daily/weekly).
-- [ ] Build stakeholder summary format (what changed, risks, asks).
-- [ ] Define concise changelog style.
+- [ ] Draft user-facing explanation style for signals and uncertainty
+- [ ] Create release-note template for model updates
+- [ ] Build weekly performance summary format

@@ -1,4 +1,4 @@
 # Creative Task Queue
-- [ ] Define naming and tone options for the project.
-- [ ] Draft UI/UX direction prompt set for first feature.
-- [ ] Prepare concept variants once target is confirmed.
+- [ ] Design UI theme options (pro trading vs clean analyst)
+- [ ] Create chart storytelling components (trend confidence bands)
+- [ ] Draft iconography and visual language for risk levels
