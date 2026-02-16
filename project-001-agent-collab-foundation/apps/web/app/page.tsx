@@ -295,6 +295,25 @@ function Kpi({ label, value, sub }: { label: string; value: string; sub?: string
   )
 }
 
+function AllocationBars({ items }: { items: Array<{ symbol: string; weight: number; alpha: number }> }) {
+  if (!items.length) return <p style={{ color: '#94a3b8' }}>No allocation candidates yet.</p>
+  return (
+    <div style={{ display: 'grid', gap: 10 }}>
+      {items.map((x) => (
+        <div key={x.symbol}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13, marginBottom: 4 }}>
+            <span style={{ color: '#cbd5e1' }}>{x.symbol}</span>
+            <span style={{ color: '#94a3b8' }}>{(x.weight * 100).toFixed(1)}% • alpha {pct(x.alpha)}</span>
+          </div>
+          <div style={{ height: 8, borderRadius: 999, background: 'rgba(148,163,184,.2)', overflow: 'hidden' }}>
+            <div style={{ width: `${Math.max(2, x.weight * 100)}%`, height: '100%', background: 'linear-gradient(90deg,#22c55e,#38bdf8)' }} />
+          </div>
+        </div>
+      ))}
+    </div>
+  )
+}
+
 export default async function Home({
   searchParams,
 }: {
@@ -340,6 +359,18 @@ export default async function Home({
   })
   const primary = sortedBacktests[0]
   const backtestBySymbol = new Map(sortedBacktests.map((b) => [b.symbol, b]))
+  const alphaPositive = sortedBacktests.filter((b) => b.alpha_vs_buy_hold > 0).slice(0, 8)
+  const alphaSum = alphaPositive.reduce((s, x) => s + x.alpha_vs_buy_hold, 0)
+  const alloc = alphaPositive.map((x) => ({
+    symbol: x.symbol,
+    alpha: x.alpha_vs_buy_hold,
+    weight: alphaSum > 0 ? x.alpha_vs_buy_hold / alphaSum : 0,
+  }))
+  const rebalanceNotes = [
+    sortedBacktests.find((b) => b.max_drawdown < -0.2) ? 'Reduce exposure to high drawdown names (>20% DD).' : 'Drawdowns look contained for current window.',
+    sortedBacktests.find((b) => b.alpha_vs_buy_hold < -0.03) ? 'Trim persistent negative-alpha assets and rotate toward top-alpha names.' : 'No severe negative-alpha outliers detected.',
+    sortedBacktests.find((b) => b.signal_accuracy < 0.45) ? 'Lower confidence on low-accuracy names; consider smaller position sizing.' : 'Signal accuracy is acceptable for active subset.',
+  ]
 
   return (
     <main style={{
@@ -579,6 +610,15 @@ export default async function Home({
               <Kpi label="PnL" value={pct(sim.pnl_pct)} sub={`Max DD ${pct(sim.max_drawdown)}`} />
             </div>
           )}
+        </section>
+
+        <section style={{ marginTop: 14, border: '1px solid rgba(148,163,184,.25)', borderRadius: 14, padding: 14, background: 'rgba(15,23,42,.5)' }}>
+          <h2 style={h2}>Suggested Allocation (Alpha-Weighted)</h2>
+          <p style={{ marginTop: 0, color: '#94a3b8' }}>Model-driven draft allocation across top positive-alpha symbols. Rebalance manually with your own risk limits.</p>
+          <AllocationBars items={alloc} />
+          <div style={{ marginTop: 10, display: 'grid', gap: 4 }}>
+            {rebalanceNotes.map((n, i) => <p key={i} style={{ margin: 0, color: '#94a3b8', fontSize: 13 }}>• {n}</p>)}
+          </div>
         </section>
 
         <section style={{ marginTop: 14, border: '1px solid rgba(148,163,184,.25)', borderRadius: 14, padding: 14, background: 'rgba(15,23,42,.5)' }}>
