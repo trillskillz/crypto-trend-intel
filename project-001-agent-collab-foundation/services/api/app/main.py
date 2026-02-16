@@ -23,6 +23,7 @@ STATE_DIR = Path(__file__).resolve().parents[1] / "state"
 WATCHLIST_FILE = STATE_DIR / "watchlist.json"
 ALERTS_FILE = STATE_DIR / "alerts_state.json"
 COINGECKO_UNIVERSE_FILE = STATE_DIR / "coingecko_universe.json"
+PINS_FILE = STATE_DIR / "pins.json"
 
 
 class TrendResponse(BaseModel):
@@ -82,6 +83,10 @@ class PortfolioSimResponse(BaseModel):
 
 
 class WatchlistResponse(BaseModel):
+    symbols: list[str]
+
+
+class PinsResponse(BaseModel):
     symbols: list[str]
 
 
@@ -145,6 +150,29 @@ def import_watchlist_from_coingecko(refresh: bool = Query(default=False)):
     symbols = [_to_pair(c.get("symbol", "")) for c in coins if c.get("symbol")]
     _save_watchlist(symbols)
     return WatchlistResponse(symbols=_load_watchlist())
+
+
+@app.get("/v1/pins", response_model=PinsResponse)
+def get_pins():
+    return PinsResponse(symbols=_load_pins())
+
+
+@app.post("/v1/pins/{symbol}", response_model=PinsResponse)
+def add_pin(symbol: str):
+    pair = _to_pair(symbol)
+    pins = _load_pins()
+    if pair not in pins:
+        pins.append(pair)
+        _save_pins(pins)
+    return PinsResponse(symbols=_load_pins())
+
+
+@app.delete("/v1/pins/{symbol}", response_model=PinsResponse)
+def remove_pin(symbol: str):
+    pair = _to_pair(symbol)
+    pins = [s for s in _load_pins() if s != pair]
+    _save_pins(pins)
+    return PinsResponse(symbols=_load_pins())
 
 
 @app.get("/v1/universe/coingecko", response_model=CoinUniverseResponse)
@@ -517,6 +545,25 @@ def _load_watchlist() -> list[str]:
         if pair not in out:
             out.append(pair)
     return out
+
+
+def _load_pins() -> list[str]:
+    data = _load_json(PINS_FILE, default=[])
+    out = []
+    for s in data:
+        pair = _to_pair(str(s))
+        if pair not in out:
+            out.append(pair)
+    return out
+
+
+def _save_pins(symbols: list[str]) -> None:
+    cleaned = []
+    for s in symbols:
+        pair = _to_pair(s)
+        if pair not in cleaned:
+            cleaned.append(pair)
+    _save_json(PINS_FILE, cleaned)
 
 
 def _save_watchlist(symbols: list[str]) -> None:

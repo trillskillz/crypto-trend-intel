@@ -63,6 +63,8 @@ type AlertFlip = { symbol: string; from_outlook: string; to_outlook: string; up_
 type AlertsCheck = { checked_at: string; risk_profile: Risk; flips: AlertFlip[] }
 type UniverseMeta = { total: number }
 type UniverseItem = { id: string; symbol: string; name: string }
+type Pins = { symbols: string[] }
+type MarketMode = 'all' | 'large-cap' | 'defi' | 'meme'
 
 const API_BASE = process.env.API_BASE_URL || 'http://127.0.0.1:8000'
 
@@ -75,6 +77,25 @@ async function mutateWatchlist(addSymbol?: string, removeSymbol?: string, import
   }
   if (removeSymbol) {
     await fetch(`${API_BASE}/v1/watchlist/${encodeURIComponent(removeSymbol)}`, { method: 'DELETE', cache: 'no-store' })
+  }
+}
+
+async function mutatePins(pinSymbol?: string, unpinSymbol?: string) {
+  if (pinSymbol) {
+    await fetch(`${API_BASE}/v1/pins/${encodeURIComponent(pinSymbol)}`, { method: 'POST', cache: 'no-store' })
+  }
+  if (unpinSymbol) {
+    await fetch(`${API_BASE}/v1/pins/${encodeURIComponent(unpinSymbol)}`, { method: 'DELETE', cache: 'no-store' })
+  }
+}
+
+async function getPins(): Promise<Pins> {
+  try {
+    const r = await fetch(`${API_BASE}/v1/pins`, { cache: 'no-store' })
+    if (!r.ok) return { symbols: [] }
+    return await r.json()
+  } catch {
+    return { symbols: [] }
   }
 }
 
@@ -112,9 +133,9 @@ async function searchUniverse(q: string): Promise<UniverseItem[]> {
   }
 }
 
-async function getAlerts(risk: Risk): Promise<AlertsCheck | null> {
+async function getAlerts(risk: Risk, maxSymbols: number): Promise<AlertsCheck | null> {
   try {
-    const r = await fetch(`${API_BASE}/v1/alerts/check?risk=${risk}`, { cache: 'no-store' })
+    const r = await fetch(`${API_BASE}/v1/alerts/check?risk=${risk}&max_symbols=${maxSymbols}`, { cache: 'no-store' })
     if (!r.ok) return null
     return await r.json()
   } catch {
@@ -175,6 +196,13 @@ function numberColor(v: number): string {
   if (v > 0) return '#22c55e'
   if (v < 0) return '#ef4444'
   return '#9ca3af'
+}
+
+function getModeSymbols(mode: MarketMode): string[] {
+  if (mode === 'large-cap') return ['BTC', 'ETH', 'BNB', 'XRP', 'SOL', 'ADA', 'DOGE', 'TRX', 'AVAX', 'LINK']
+  if (mode === 'defi') return ['UNI', 'AAVE', 'MKR', 'SNX', 'COMP', 'CRV', 'SUSHI', 'LDO', 'RUNE', 'INJ']
+  if (mode === 'meme') return ['DOGE', 'SHIB', 'PEPE', 'WIF', 'FLOKI', 'BONK', 'BOME', 'MEME', 'POPCAT', 'TURBO']
+  return []
 }
 
 function outlookPill(p: number) {
@@ -259,7 +287,7 @@ function Kpi({ label, value, sub }: { label: string; value: string; sub?: string
 export default async function Home({
   searchParams,
 }: {
-  searchParams?: { lookback?: string; risk?: string; capital?: string; addSymbol?: string; removeSymbol?: string; importAll?: string; q?: string; active?: string }
+  searchParams?: { lookback?: string; risk?: string; capital?: string; addSymbol?: string; removeSymbol?: string; importAll?: string; q?: string; active?: string; sort?: string; mode?: string; pin?: string; unpin?: string }
 }) {
   const lookback = Number(searchParams?.lookback || '240')
   const safeLookback = [120, 240, 360, 720].includes(lookback) ? lookback : 240
@@ -270,10 +298,17 @@ export default async function Home({
   const active = Number(searchParams?.active || '24')
   const safeActive = [12, 24, 50, 100].includes(active) ? active : 24
   const q = (searchParams?.q || '').trim()
+  const sort = (searchParams?.sort || 'alpha') as 'alpha' | 'accuracy' | 'drawdown'
+  const mode = ((searchParams?.mode || 'all') as MarketMode)
 
   await mutateWatchlist(searchParams?.addSymbol, searchParams?.removeSymbol, searchParams?.importAll)
-  const watchlist = await getWatchlist()
-  const symbols = watchlist.symbols.length ? watchlist.symbols : ['BTCUSDT', 'ETHUSDT', 'SOLUSDT']
+  await mutatePins(searchParams?.pin, searchParams?.unpin)
+  const [watchlist, pinsData] = await Promise.all([getWatchlist(), getPins()])
+  const baseSymbols = watchlist.symbols.length ? watchlist.symbols : ['BTCUSDT', 'ETHUSDT', 'SOLUSDT']
+  const modeSymbols = getModeSymbols(mode).map((s) => `${s}USDT`)
+  const filtered = mode === 'all' ? baseSymbols : baseSymbols.filter((s) => modeSymbols.includes(s))
+  const pins = pinsData.symbols
+  const symbols = [...pins.filter((p) => filtered.includes(p)), ...filtered.filter((s) => !pins.includes(s))]
   const activeSymbols = symbols.slice(0, safeActive)
 
   const [trends, backtests, explain, sim, alerts, universe, universeMatches] = await Promise.all([
@@ -281,13 +316,18 @@ export default async function Home({
     getBacktests(safeLookback, safeRisk, activeSymbols),
     getExplain('BTC', safeRisk),
     getPortfolioSim('BTC', safeRisk, Math.max(240, safeLookback), safeCapital),
-    getAlerts(safeRisk),
+    getAlerts(safeRisk, Math.min(300, safeActive * 3)),
     getUniverseMeta(),
     searchUniverse(q),
   ])
 
-  const primary = backtests[0]
-  const backtestBySymbol = new Map(backtests.map((b) => [b.symbol, b]))
+  const sortedBacktests = [...backtests].sort((a, b) => {
+    if (sort === 'accuracy') return b.signal_accuracy - a.signal_accuracy
+    if (sort === 'drawdown') return a.max_drawdown - b.max_drawdown
+    return b.alpha_vs_buy_hold - a.alpha_vs_buy_hold
+  })
+  const primary = sortedBacktests[0]
+  const backtestBySymbol = new Map(sortedBacktests.map((b) => [b.symbol, b]))
 
   return (
     <main style={{
@@ -343,13 +383,33 @@ export default async function Home({
               </select>
             </label>
 
+            <label style={{ display: 'grid', gap: 6 }}>
+              <span style={{ color: '#94a3b8', fontSize: 12 }}>Market Mode</span>
+              <select name="mode" defaultValue={mode} style={inputStyle}>
+                <option value="all">All</option>
+                <option value="large-cap">Large Caps</option>
+                <option value="defi">DeFi</option>
+                <option value="meme">Meme</option>
+              </select>
+            </label>
+
+            <label style={{ display: 'grid', gap: 6 }}>
+              <span style={{ color: '#94a3b8', fontSize: 12 }}>Sort Backtests</span>
+              <select name="sort" defaultValue={sort} style={inputStyle}>
+                <option value="alpha">Best Alpha</option>
+                <option value="accuracy">Best Accuracy</option>
+                <option value="drawdown">Lowest Drawdown</option>
+              </select>
+            </label>
+
             <button type="submit" style={primaryButton}>Apply Settings</button>
           </form>
         </section>
 
         <section style={{ marginTop: 14, display: 'grid', gridTemplateColumns: 'repeat(auto-fit,minmax(220px,1fr))', gap: 10 }}>
           <Kpi label="Tracked Symbols" value={String(symbols.length)} sub={symbols.slice(0, 8).join(', ') + (symbols.length > 8 ? '…' : '')} />
-          <Kpi label="Backtest Window" value={`${safeLookback}h`} sub="rolling evaluation" />
+          <Kpi label="Backtest Window" value={`${safeLookback}h`} sub={`rolling evaluation • ${mode}`} />
+          <Kpi label="Pinned Favorites" value={String(pins.length)} sub={pins.slice(0, 4).join(', ') || 'none'} />
           <Kpi label="CoinGecko Universe" value={universe ? universe.total.toLocaleString() : 'n/a'} sub="total listed assets" />
           <Kpi label="Alert Flips" value={String(alerts?.flips.length ?? 0)} sub={alerts?.checked_at ? `last check ${new Date(alerts.checked_at).toLocaleTimeString()}` : 'n/a'} />
           <Kpi label="Portfolio PnL" value={sim ? pct(sim.pnl_pct) : 'n/a'} sub={sim ? `Final: $${sim.final_equity.toLocaleString()}` : 'simulator unavailable'} />
@@ -367,14 +427,16 @@ export default async function Home({
             <input type="hidden" name="risk" value={safeRisk} />
             <input type="hidden" name="capital" value={safeCapital} />
             <input type="hidden" name="active" value={safeActive} />
+            <input type="hidden" name="sort" value={sort} />
+            <input type="hidden" name="mode" value={mode} />
             <button type="submit" style={primaryButton}>Add</button>
-            <a href={`?lookback=${safeLookback}&risk=${safeRisk}&capital=${safeCapital}&active=${safeActive}&importAll=1`} style={{ ...primaryButton, textDecoration: 'none', display: 'inline-flex', alignItems: 'center' }}>Import all from CoinGecko</a>
+            <a href={`?lookback=${safeLookback}&risk=${safeRisk}&capital=${safeCapital}&active=${safeActive}&sort=${sort}&mode=${mode}&importAll=1`} style={{ ...primaryButton, textDecoration: 'none', display: 'inline-flex', alignItems: 'center' }}>Import all from CoinGecko</a>
           </form>
           <p style={{ marginTop: 8, marginBottom: 6, color: '#94a3b8', fontSize: 12 }}>Tip: importing the full universe is huge and can slow trend/alert refreshes.</p>
           <div style={{ marginTop: 10, color: '#94a3b8', fontSize: 13 }}>
             Remove:&nbsp;
             {symbols.slice(0, 20).map((s) => (
-              <a key={s} href={`?lookback=${safeLookback}&risk=${safeRisk}&capital=${safeCapital}&active=${safeActive}&removeSymbol=${s.replace('USDT', '')}`} style={linkChip}>{s}</a>
+              <a key={s} href={`?lookback=${safeLookback}&risk=${safeRisk}&capital=${safeCapital}&active=${safeActive}&sort=${sort}&mode=${mode}&removeSymbol=${s.replace('USDT', '')}`} style={linkChip}>{s}</a>
             ))}
           </div>
         </section>
@@ -387,6 +449,8 @@ export default async function Home({
             <input type="hidden" name="risk" value={safeRisk} />
             <input type="hidden" name="capital" value={safeCapital} />
             <input type="hidden" name="active" value={safeActive} />
+            <input type="hidden" name="sort" value={sort} />
+            <input type="hidden" name="mode" value={mode} />
             <button type="submit" style={primaryButton}>Search</button>
           </form>
           {q ? (
@@ -395,7 +459,7 @@ export default async function Home({
                 {universeMatches.map((c) => (
                   <a
                     key={`${c.id}-${c.symbol}`}
-                    href={`?lookback=${safeLookback}&risk=${safeRisk}&capital=${safeCapital}&active=${safeActive}&addSymbol=${encodeURIComponent(c.symbol)}`}
+                    href={`?lookback=${safeLookback}&risk=${safeRisk}&capital=${safeCapital}&active=${safeActive}&sort=${sort}&mode=${mode}&addSymbol=${encodeURIComponent(c.symbol)}`}
                     style={{ border: '1px solid rgba(148,163,184,.25)', borderRadius: 10, padding: 10, textDecoration: 'none', color: '#cbd5e1' }}
                   >
                     <strong>{c.symbol.toUpperCase()}</strong> • {c.name}
@@ -429,9 +493,17 @@ export default async function Home({
               const bt = backtestBySymbol.get(t.symbol)
               return (
                 <article key={t.symbol} style={{ border: '1px solid rgba(148,163,184,.25)', borderRadius: 14, padding: 14, background: 'linear-gradient(180deg, rgba(15,23,42,.75), rgba(2,6,23,.9))' }}>
-                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8 }}>
                     <h3 style={{ margin: 0 }}>{t.symbol}</h3>
-                    <span style={{ padding: '4px 8px', borderRadius: 999, background: pill.bg, color: pill.color, fontSize: 12, fontWeight: 600 }}>{pill.label}</span>
+                    <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+                      <a
+                        href={`?lookback=${safeLookback}&risk=${safeRisk}&capital=${safeCapital}&active=${safeActive}&sort=${sort}&mode=${mode}&${pins.includes(t.symbol) ? `unpin=${t.symbol.replace('USDT', '')}` : `pin=${t.symbol.replace('USDT', '')}`}`}
+                        style={{ ...linkChip, margin: 0, color: pins.includes(t.symbol) ? '#fbbf24' : '#93c5fd' }}
+                      >
+                        {pins.includes(t.symbol) ? '★ Pinned' : '☆ Pin'}
+                      </a>
+                      <span style={{ padding: '4px 8px', borderRadius: 999, background: pill.bg, color: pill.color, fontSize: 12, fontWeight: 600 }}>{pill.label}</span>
+                    </div>
                   </div>
                   <p style={{ margin: '8px 0', fontSize: 28, fontWeight: 700 }}>{pct(t.up_probability)}</p>
                   <p style={{ margin: '4px 0', color: '#94a3b8' }}><strong style={{ color: '#cbd5e1' }}>Momentum:</strong> {t.momentum_score.toFixed(3)}</p>
@@ -487,7 +559,7 @@ export default async function Home({
 
         <section style={{ marginTop: 14, border: '1px solid rgba(148,163,184,.25)', borderRadius: 14, padding: 14, background: 'rgba(15,23,42,.5)' }}>
           <h2 style={h2}>Backtest Summary</h2>
-          {backtests.length === 0 ? (
+          {sortedBacktests.length === 0 ? (
             <p style={{ color: '#94a3b8' }}>Backtests unavailable.</p>
           ) : (
             <div style={{ overflowX: 'auto' }}>
@@ -503,7 +575,7 @@ export default async function Home({
                   </tr>
                 </thead>
                 <tbody>
-                  {backtests.map((b) => (
+                  {sortedBacktests.map((b) => (
                     <tr key={b.symbol} style={{ borderBottom: '1px solid rgba(148,163,184,.15)' }}>
                       <td style={td}>{b.symbol}</td>
                       <td align="right" style={td}>{pct(b.signal_accuracy)}</td>
