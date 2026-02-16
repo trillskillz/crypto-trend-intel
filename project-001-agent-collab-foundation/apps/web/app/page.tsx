@@ -7,6 +7,12 @@ type Trend = {
   explanation: string
 }
 
+type EquityPoint = {
+  t: number
+  strategy: number
+  buy_hold: number
+}
+
 type Backtest = {
   symbol: string
   bars_tested: number
@@ -16,6 +22,9 @@ type Backtest = {
   alpha_vs_buy_hold: number
   max_drawdown: number
   notes: string
+  start_time: string
+  end_time: string
+  equity_curve: EquityPoint[]
 }
 
 const API_BASE = process.env.API_BASE_URL || 'http://127.0.0.1:8000'
@@ -30,13 +39,13 @@ async function getTrends(): Promise<Trend[]> {
   }
 }
 
-async function getBacktest(symbol: string): Promise<Backtest | null> {
+async function getBacktests(lookback: number): Promise<Backtest[]> {
   try {
-    const r = await fetch(`${API_BASE}/v1/backtest/${symbol}`, { cache: 'no-store' })
-    if (!r.ok) return null
+    const r = await fetch(`${API_BASE}/v1/backtest?symbols=BTC,ETH,SOL&lookback=${lookback}`, { cache: 'no-store' })
+    if (!r.ok) return []
     return await r.json()
   } catch {
-    return null
+    return []
   }
 }
 
@@ -44,14 +53,61 @@ function pct(v: number): string {
   return `${(v * 100).toFixed(1)}%`
 }
 
-export default async function Home() {
-  const trends = await getTrends()
-  const backtest = await getBacktest('BTC')
+function EquityChart({ data }: { data: EquityPoint[] }) {
+  if (!data.length) return <p>No chart data.</p>
+
+  const w = 760
+  const h = 220
+  const pad = 20
+
+  const all = data.flatMap((d) => [d.strategy, d.buy_hold])
+  const minV = Math.min(...all)
+  const maxV = Math.max(...all)
+  const span = Math.max(0.0001, maxV - minV)
+
+  const toXY = (v: number, i: number) => {
+    const x = pad + (i / Math.max(1, data.length - 1)) * (w - pad * 2)
+    const y = h - pad - ((v - minV) / span) * (h - pad * 2)
+    return `${x},${y}`
+  }
+
+  const strat = data.map((d, i) => toXY(d.strategy, i)).join(' ')
+  const hold = data.map((d, i) => toXY(d.buy_hold, i)).join(' ')
+
+  return (
+    <svg viewBox={`0 0 ${w} ${h}`} style={{ width: '100%', border: '1px solid #ddd', borderRadius: 8, background: '#fff' }}>
+      <polyline points={hold} fill="none" stroke="#888" strokeWidth="2" />
+      <polyline points={strat} fill="none" stroke="#0a7" strokeWidth="2.5" />
+      <text x={16} y={18} fontSize="12" fill="#444">Strategy (green) vs Buy&Hold (gray)</text>
+    </svg>
+  )
+}
+
+export default async function Home({ searchParams }: { searchParams?: { lookback?: string } }) {
+  const lookback = Number(searchParams?.lookback || '240')
+  const safeLookback = [120, 240, 360, 720].includes(lookback) ? lookback : 240
+
+  const [trends, backtests] = await Promise.all([getTrends(), getBacktests(safeLookback)])
+  const primary = backtests[0]
 
   return (
     <main style={{ padding: 24, fontFamily: 'system-ui' }}>
       <h1>Crypto Trend Intelligence</h1>
-      <p>Live baseline signals + backtest quality snapshot.</p>
+      <p>Live signals + multi-asset backtest analytics.</p>
+
+      <form style={{ marginBottom: 14 }}>
+        <label>
+          Backtest range:&nbsp;
+          <select name="lookback" defaultValue={String(safeLookback)}>
+            <option value="120">Last 120h</option>
+            <option value="240">Last 240h</option>
+            <option value="360">Last 360h</option>
+            <option value="720">Last 720h</option>
+          </select>
+        </label>
+        &nbsp;
+        <button type="submit">Apply</button>
+      </form>
 
       {trends.length === 0 ? (
         <p style={{ color: '#a00' }}>
@@ -72,18 +128,46 @@ export default async function Home() {
       )}
 
       <section style={{ marginTop: 20, border: '1px solid #ddd', borderRadius: 12, padding: 14 }}>
-        <h2 style={{ marginTop: 0 }}>Baseline Backtest (BTC)</h2>
-        {!backtest ? (
-          <p>Backtest unavailable.</p>
+        <h2 style={{ marginTop: 0 }}>Backtest Summary</h2>
+        {backtests.length === 0 ? (
+          <p>Backtests unavailable.</p>
         ) : (
-          <ul>
-            <li><strong>Bars tested:</strong> {backtest.bars_tested}</li>
-            <li><strong>Signal accuracy:</strong> {pct(backtest.signal_accuracy)}</li>
-            <li><strong>Strategy return:</strong> {pct(backtest.strategy_return)}</li>
-            <li><strong>Buy & hold:</strong> {pct(backtest.buy_hold_return)}</li>
-            <li><strong>Alpha vs buy & hold:</strong> {pct(backtest.alpha_vs_buy_hold)}</li>
-            <li><strong>Max drawdown:</strong> {pct(backtest.max_drawdown)}</li>
-          </ul>
+          <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+            <thead>
+              <tr>
+                <th align="left">Symbol</th>
+                <th align="right">Accuracy</th>
+                <th align="right">Strategy</th>
+                <th align="right">Buy&Hold</th>
+                <th align="right">Alpha</th>
+                <th align="right">Max DD</th>
+              </tr>
+            </thead>
+            <tbody>
+              {backtests.map((b) => (
+                <tr key={b.symbol}>
+                  <td>{b.symbol}</td>
+                  <td align="right">{pct(b.signal_accuracy)}</td>
+                  <td align="right">{pct(b.strategy_return)}</td>
+                  <td align="right">{pct(b.buy_hold_return)}</td>
+                  <td align="right">{pct(b.alpha_vs_buy_hold)}</td>
+                  <td align="right">{pct(b.max_drawdown)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </section>
+
+      <section style={{ marginTop: 20, border: '1px solid #ddd', borderRadius: 12, padding: 14 }}>
+        <h2 style={{ marginTop: 0 }}>Equity Curve ({primary?.symbol || 'N/A'})</h2>
+        {primary ? (
+          <>
+            <p style={{ marginTop: 0, color: '#555' }}>{primary.start_time} → {primary.end_time}</p>
+            <EquityChart data={primary.equity_curve} />
+          </>
+        ) : (
+          <p>No curve available.</p>
         )}
       </section>
     </main>

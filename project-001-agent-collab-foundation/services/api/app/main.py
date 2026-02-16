@@ -1,17 +1,18 @@
 from __future__ import annotations
 
 import math
+from datetime import UTC, datetime
 from typing import Literal
 
 import httpx
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query
 from pydantic import BaseModel
 
-app = FastAPI(title="Crypto Trend API", version="0.3.0")
+app = FastAPI(title="Crypto Trend API", version="0.4.0")
 
 BINANCE_BASE_URL = "https://api.binance.com"
 INTERVAL = "1h"
-LIMIT = 240
+LIMIT = 1000
 
 
 class TrendResponse(BaseModel):
@@ -23,6 +24,12 @@ class TrendResponse(BaseModel):
     explanation: str
 
 
+class EquityPoint(BaseModel):
+    t: int
+    strategy: float
+    buy_hold: float
+
+
 class BacktestResponse(BaseModel):
     symbol: str
     bars_tested: int
@@ -32,6 +39,9 @@ class BacktestResponse(BaseModel):
     alpha_vs_buy_hold: float
     max_drawdown: float
     notes: str
+    start_time: str
+    end_time: str
+    equity_curve: list[EquityPoint]
 
 
 @app.get("/health")
@@ -42,7 +52,8 @@ def health():
 @app.get("/v1/trends/{symbol}", response_model=TrendResponse)
 def trend(symbol: str):
     pair = _to_pair(symbol)
-    closes = _fetch_closes(pair)
+    klines = _fetch_klines(pair)
+    closes = [k["close"] for k in klines]
     if len(closes) < 60:
         raise HTTPException(status_code=502, detail="Not enough market data")
 
@@ -70,13 +81,20 @@ def trend_batch(symbols: str = "BTC,ETH,SOL"):
 
 
 @app.get("/v1/backtest/{symbol}", response_model=BacktestResponse)
-def backtest(symbol: str):
+def backtest(
+    symbol: str,
+    lookback: int = Query(default=240, ge=120, le=900),
+):
     pair = _to_pair(symbol)
-    closes = _fetch_closes(pair)
-    if len(closes) < 120:
-        raise HTTPException(status_code=502, detail="Not enough market data for backtest")
+    klines = _fetch_klines(pair)
 
-    # rolling signal: predict next bar up/down using current momentum+vol
+    if len(klines) < lookback:
+        raise HTTPException(status_code=502, detail="Not enough market data for requested lookback")
+
+    window = klines[-lookback:]
+    closes = [k["close"] for k in window]
+    times = [k["open_time"] for k in window]
+
     start = 60
     correct = 0
     total = 0
@@ -84,11 +102,12 @@ def backtest(symbol: str):
     buy_hold = 1.0
     peak = 1.0
     max_dd = 0.0
+    curve: list[EquityPoint] = []
 
     for i in range(start, len(closes) - 1):
-        window = closes[: i + 1]
-        m = _momentum_score(window)
-        v = _volatility(window)
+        hist = closes[: i + 1]
+        m = _momentum_score(hist)
+        v = _volatility(hist)
         p_up = _up_probability(m, v)
 
         next_ret = (closes[i + 1] / closes[i]) - 1.0
@@ -98,7 +117,6 @@ def backtest(symbol: str):
             correct += 1
         total += 1
 
-        # long if p>=0.55, else flat
         if p_up >= 0.55:
             equity *= (1.0 + next_ret)
         buy_hold *= (1.0 + next_ret)
@@ -106,6 +124,14 @@ def backtest(symbol: str):
         peak = max(peak, equity)
         dd = (equity / peak) - 1.0
         max_dd = min(max_dd, dd)
+
+        curve.append(
+            EquityPoint(
+                t=times[i + 1],
+                strategy=round(equity, 6),
+                buy_hold=round(buy_hold, 6),
+            )
+        )
 
     if total == 0:
         raise HTTPException(status_code=502, detail="Backtest produced no samples")
@@ -123,7 +149,18 @@ def backtest(symbol: str):
         alpha_vs_buy_hold=round(alpha, 4),
         max_drawdown=round(max_dd, 4),
         notes="Baseline heuristic backtest. Use for directional calibration only.",
+        start_time=_fmt_ms(times[start]),
+        end_time=_fmt_ms(times[-1]),
+        equity_curve=curve,
     )
+
+
+@app.get("/v1/backtest")
+def backtest_batch(
+    symbols: str = "BTC,ETH,SOL",
+    lookback: int = Query(default=240, ge=120, le=900),
+):
+    return [backtest(s.strip(), lookback=lookback) for s in symbols.split(",") if s.strip()]
 
 
 def _to_pair(symbol: str) -> str:
@@ -131,18 +168,24 @@ def _to_pair(symbol: str) -> str:
     return pair if pair.endswith("USDT") else f"{pair}USDT"
 
 
-def _fetch_closes(symbol: str) -> list[float]:
+def _fetch_klines(symbol: str) -> list[dict]:
     url = f"{BINANCE_BASE_URL}/api/v3/klines"
     params = {"symbol": symbol, "interval": INTERVAL, "limit": LIMIT}
     try:
-        with httpx.Client(timeout=10.0) as client:
+        with httpx.Client(timeout=12.0) as client:
             r = client.get(url, params=params)
             r.raise_for_status()
             raw = r.json()
     except Exception as exc:  # pragma: no cover
         raise HTTPException(status_code=502, detail=f"Market data fetch failed: {exc}") from exc
 
-    return [float(row[4]) for row in raw]
+    return [
+        {
+            "open_time": int(row[0]),
+            "close": float(row[4]),
+        }
+        for row in raw
+    ]
 
 
 def _momentum_score(closes: list[float]) -> float:
@@ -172,3 +215,7 @@ def _volatility_regime(vol: float) -> Literal["low", "medium", "high"]:
     if vol < 0.02:
         return "medium"
     return "high"
+
+
+def _fmt_ms(ms: int) -> str:
+    return datetime.fromtimestamp(ms / 1000, tz=UTC).isoformat()
