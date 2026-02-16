@@ -8,16 +8,18 @@ import httpx
 from fastapi import FastAPI, HTTPException, Query
 from pydantic import BaseModel
 
-app = FastAPI(title="Crypto Trend API", version="0.4.0")
+app = FastAPI(title="Crypto Trend API", version="0.5.0")
 
 BINANCE_BASE_URL = "https://api.binance.com"
 INTERVAL = "1h"
 LIMIT = 1000
+RiskProfile = Literal["conservative", "moderate", "aggressive"]
 
 
 class TrendResponse(BaseModel):
     symbol: str
     horizon: str
+    risk_profile: RiskProfile
     up_probability: float
     momentum_score: float
     volatility_regime: Literal["low", "medium", "high"]
@@ -33,6 +35,7 @@ class EquityPoint(BaseModel):
 class BacktestResponse(BaseModel):
     symbol: str
     bars_tested: int
+    risk_profile: RiskProfile
     signal_accuracy: float
     strategy_return: float
     buy_hold_return: float
@@ -44,16 +47,28 @@ class BacktestResponse(BaseModel):
     equity_curve: list[EquityPoint]
 
 
+class ExplainResponse(BaseModel):
+    symbol: str
+    risk_profile: RiskProfile
+    outlook: Literal["bullish", "neutral", "bearish"]
+    confidence: float
+    drivers: list[str]
+    caution: list[str]
+    summary: str
+
+
 @app.get("/health")
 def health():
     return {"ok": True, "service": "crypto-trend-api"}
 
 
 @app.get("/v1/trends/{symbol}", response_model=TrendResponse)
-def trend(symbol: str):
+def trend(
+    symbol: str,
+    risk: RiskProfile = Query(default="moderate"),
+):
     pair = _to_pair(symbol)
-    klines = _fetch_klines(pair)
-    closes = [k["close"] for k in klines]
+    closes = [k["close"] for k in _fetch_klines(pair)]
     if len(closes) < 60:
         raise HTTPException(status_code=502, detail="Not enough market data")
 
@@ -65,25 +80,27 @@ def trend(symbol: str):
     return TrendResponse(
         symbol=pair,
         horizon="24h",
+        risk_profile=risk,
         up_probability=round(up_probability, 4),
         momentum_score=round(momentum, 4),
         volatility_regime=regime,
-        explanation=(
-            f"Baseline signal from Binance {INTERVAL} candles: momentum={momentum:.3f}, "
-            f"volatility={vol:.4f}, regime={regime}."
-        ),
+        explanation=_signal_explanation(momentum, vol, regime, risk),
     )
 
 
 @app.get("/v1/trends")
-def trend_batch(symbols: str = "BTC,ETH,SOL"):
-    return [trend(s.strip()) for s in symbols.split(",") if s.strip()]
+def trend_batch(
+    symbols: str = "BTC,ETH,SOL",
+    risk: RiskProfile = Query(default="moderate"),
+):
+    return [trend(s.strip(), risk=risk) for s in symbols.split(",") if s.strip()]
 
 
 @app.get("/v1/backtest/{symbol}", response_model=BacktestResponse)
 def backtest(
     symbol: str,
     lookback: int = Query(default=240, ge=120, le=900),
+    risk: RiskProfile = Query(default="moderate"),
 ):
     pair = _to_pair(symbol)
     klines = _fetch_klines(pair)
@@ -104,6 +121,8 @@ def backtest(
     max_dd = 0.0
     curve: list[EquityPoint] = []
 
+    entry_threshold = _entry_threshold(risk)
+
     for i in range(start, len(closes) - 1):
         hist = closes[: i + 1]
         m = _momentum_score(hist)
@@ -117,7 +136,7 @@ def backtest(
             correct += 1
         total += 1
 
-        if p_up >= 0.55:
+        if p_up >= entry_threshold:
             equity *= (1.0 + next_ret)
         buy_hold *= (1.0 + next_ret)
 
@@ -126,11 +145,7 @@ def backtest(
         max_dd = min(max_dd, dd)
 
         curve.append(
-            EquityPoint(
-                t=times[i + 1],
-                strategy=round(equity, 6),
-                buy_hold=round(buy_hold, 6),
-            )
+            EquityPoint(t=times[i + 1], strategy=round(equity, 6), buy_hold=round(buy_hold, 6))
         )
 
     if total == 0:
@@ -143,12 +158,13 @@ def backtest(
     return BacktestResponse(
         symbol=pair,
         bars_tested=total,
+        risk_profile=risk,
         signal_accuracy=round(correct / total, 4),
         strategy_return=round(strat_ret, 4),
         buy_hold_return=round(bh_ret, 4),
         alpha_vs_buy_hold=round(alpha, 4),
         max_drawdown=round(max_dd, 4),
-        notes="Baseline heuristic backtest. Use for directional calibration only.",
+        notes=f"Baseline heuristic backtest with {risk} threshold={entry_threshold:.2f}.",
         start_time=_fmt_ms(times[start]),
         end_time=_fmt_ms(times[-1]),
         equity_curve=curve,
@@ -159,8 +175,53 @@ def backtest(
 def backtest_batch(
     symbols: str = "BTC,ETH,SOL",
     lookback: int = Query(default=240, ge=120, le=900),
+    risk: RiskProfile = Query(default="moderate"),
 ):
-    return [backtest(s.strip(), lookback=lookback) for s in symbols.split(",") if s.strip()]
+    return [backtest(s.strip(), lookback=lookback, risk=risk) for s in symbols.split(",") if s.strip()]
+
+
+@app.get("/v1/explain/{symbol}", response_model=ExplainResponse)
+def explain(
+    symbol: str,
+    risk: RiskProfile = Query(default="moderate"),
+):
+    t = trend(symbol, risk=risk)
+    confidence = abs(t.up_probability - 0.5) * 2.0
+    outlook: Literal["bullish", "neutral", "bearish"]
+    if t.up_probability >= 0.56:
+        outlook = "bullish"
+    elif t.up_probability <= 0.44:
+        outlook = "bearish"
+    else:
+        outlook = "neutral"
+
+    drivers = [
+        f"Momentum score is {t.momentum_score:+.3f}",
+        f"Volatility regime is {t.volatility_regime}",
+        f"Model up-probability is {t.up_probability:.1%}",
+    ]
+
+    caution = [
+        "Signal is baseline and should be validated with additional factors",
+        "Crypto volatility can invalidate short-term forecasts quickly",
+    ]
+    if t.volatility_regime == "high":
+        caution.append("High volatility regime increases whipsaw risk")
+    if risk == "aggressive":
+        caution.append("Aggressive profile takes more entries and larger drawdown risk")
+
+    return ExplainResponse(
+        symbol=t.symbol,
+        risk_profile=risk,
+        outlook=outlook,
+        confidence=round(confidence, 4),
+        drivers=drivers,
+        caution=caution,
+        summary=(
+            f"{outlook.title()} setup with {confidence:.1%} confidence under {risk} risk profile. "
+            f"Primary driver: momentum {t.momentum_score:+.3f} in {t.volatility_regime} volatility."
+        ),
+    )
 
 
 def _to_pair(symbol: str) -> str:
@@ -179,13 +240,7 @@ def _fetch_klines(symbol: str) -> list[dict]:
     except Exception as exc:  # pragma: no cover
         raise HTTPException(status_code=502, detail=f"Market data fetch failed: {exc}") from exc
 
-    return [
-        {
-            "open_time": int(row[0]),
-            "close": float(row[4]),
-        }
-        for row in raw
-    ]
+    return [{"open_time": int(row[0]), "close": float(row[4])} for row in raw]
 
 
 def _momentum_score(closes: list[float]) -> float:
@@ -219,3 +274,18 @@ def _volatility_regime(vol: float) -> Literal["low", "medium", "high"]:
 
 def _fmt_ms(ms: int) -> str:
     return datetime.fromtimestamp(ms / 1000, tz=UTC).isoformat()
+
+
+def _entry_threshold(risk: RiskProfile) -> float:
+    if risk == "conservative":
+        return 0.62
+    if risk == "aggressive":
+        return 0.52
+    return 0.55
+
+
+def _signal_explanation(momentum: float, vol: float, regime: str, risk: RiskProfile) -> str:
+    return (
+        f"Baseline from Binance {INTERVAL}: momentum={momentum:+.3f}, volatility={vol:.4f} ({regime}). "
+        f"Risk profile={risk}."
+    )

@@ -1,6 +1,9 @@
+type Risk = 'conservative' | 'moderate' | 'aggressive'
+
 type Trend = {
   symbol: string
   horizon: string
+  risk_profile: Risk
   up_probability: number
   momentum_score: number
   volatility_regime: 'low' | 'medium' | 'high'
@@ -16,6 +19,7 @@ type EquityPoint = {
 type Backtest = {
   symbol: string
   bars_tested: number
+  risk_profile: Risk
   signal_accuracy: number
   strategy_return: number
   buy_hold_return: number
@@ -27,11 +31,21 @@ type Backtest = {
   equity_curve: EquityPoint[]
 }
 
+type Explain = {
+  symbol: string
+  risk_profile: Risk
+  outlook: 'bullish' | 'neutral' | 'bearish'
+  confidence: number
+  drivers: string[]
+  caution: string[]
+  summary: string
+}
+
 const API_BASE = process.env.API_BASE_URL || 'http://127.0.0.1:8000'
 
-async function getTrends(): Promise<Trend[]> {
+async function getTrends(risk: Risk): Promise<Trend[]> {
   try {
-    const r = await fetch(`${API_BASE}/v1/trends?symbols=BTC,ETH,SOL`, { cache: 'no-store' })
+    const r = await fetch(`${API_BASE}/v1/trends?symbols=BTC,ETH,SOL&risk=${risk}`, { cache: 'no-store' })
     if (!r.ok) return []
     return await r.json()
   } catch {
@@ -39,13 +53,23 @@ async function getTrends(): Promise<Trend[]> {
   }
 }
 
-async function getBacktests(lookback: number): Promise<Backtest[]> {
+async function getBacktests(lookback: number, risk: Risk): Promise<Backtest[]> {
   try {
-    const r = await fetch(`${API_BASE}/v1/backtest?symbols=BTC,ETH,SOL&lookback=${lookback}`, { cache: 'no-store' })
+    const r = await fetch(`${API_BASE}/v1/backtest?symbols=BTC,ETH,SOL&lookback=${lookback}&risk=${risk}`, { cache: 'no-store' })
     if (!r.ok) return []
     return await r.json()
   } catch {
     return []
+  }
+}
+
+async function getExplain(symbol: string, risk: Risk): Promise<Explain | null> {
+  try {
+    const r = await fetch(`${API_BASE}/v1/explain/${symbol}?risk=${risk}`, { cache: 'no-store' })
+    if (!r.ok) return null
+    return await r.json()
+  } catch {
+    return null
   }
 }
 
@@ -83,19 +107,26 @@ function EquityChart({ data }: { data: EquityPoint[] }) {
   )
 }
 
-export default async function Home({ searchParams }: { searchParams?: { lookback?: string } }) {
+export default async function Home({ searchParams }: { searchParams?: { lookback?: string; risk?: string } }) {
   const lookback = Number(searchParams?.lookback || '240')
   const safeLookback = [120, 240, 360, 720].includes(lookback) ? lookback : 240
+  const risk = (searchParams?.risk || 'moderate') as Risk
+  const safeRisk: Risk = ['conservative', 'moderate', 'aggressive'].includes(risk) ? risk : 'moderate'
 
-  const [trends, backtests] = await Promise.all([getTrends(), getBacktests(safeLookback)])
+  const [trends, backtests, explain] = await Promise.all([
+    getTrends(safeRisk),
+    getBacktests(safeLookback, safeRisk),
+    getExplain('BTC', safeRisk),
+  ])
+
   const primary = backtests[0]
 
   return (
     <main style={{ padding: 24, fontFamily: 'system-ui' }}>
       <h1>Crypto Trend Intelligence</h1>
-      <p>Live signals + multi-asset backtest analytics.</p>
+      <p>Live signals + multi-asset backtest analytics + AI explanation.</p>
 
-      <form style={{ marginBottom: 14 }}>
+      <form style={{ marginBottom: 14, display: 'flex', gap: 12, flexWrap: 'wrap' }}>
         <label>
           Backtest range:&nbsp;
           <select name="lookback" defaultValue={String(safeLookback)}>
@@ -105,7 +136,16 @@ export default async function Home({ searchParams }: { searchParams?: { lookback
             <option value="720">Last 720h</option>
           </select>
         </label>
-        &nbsp;
+
+        <label>
+          Risk profile:&nbsp;
+          <select name="risk" defaultValue={safeRisk}>
+            <option value="conservative">Conservative</option>
+            <option value="moderate">Moderate</option>
+            <option value="aggressive">Aggressive</option>
+          </select>
+        </label>
+
         <button type="submit">Apply</button>
       </form>
 
@@ -126,6 +166,22 @@ export default async function Home({ searchParams }: { searchParams?: { lookback
           ))}
         </div>
       )}
+
+      <section style={{ marginTop: 20, border: '1px solid #ddd', borderRadius: 12, padding: 14 }}>
+        <h2 style={{ marginTop: 0 }}>AI Explanation (BTC)</h2>
+        {!explain ? (
+          <p>Explanation unavailable.</p>
+        ) : (
+          <>
+            <p><strong>Outlook:</strong> {explain.outlook} ({pct(explain.confidence)} confidence)</p>
+            <p>{explain.summary}</p>
+            <p><strong>Drivers</strong></p>
+            <ul>{explain.drivers.map((d, i) => <li key={i}>{d}</li>)}</ul>
+            <p><strong>Cautions</strong></p>
+            <ul>{explain.caution.map((d, i) => <li key={i}>{d}</li>)}</ul>
+          </>
+        )}
+      </section>
 
       <section style={{ marginTop: 20, border: '1px solid #ddd', borderRadius: 12, padding: 14 }}>
         <h2 style={{ marginTop: 0 }}>Backtest Summary</h2>
