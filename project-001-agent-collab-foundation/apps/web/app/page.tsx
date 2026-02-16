@@ -167,6 +167,27 @@ function ConfidenceBar({ value }: { value: number }) {
   )
 }
 
+function MiniTrendline({ data }: { data: EquityPoint[] }) {
+  if (!data.length) return null
+  const w = 220
+  const h = 54
+  const pad = 4
+  const vals = data.map((d) => d.strategy)
+  const minV = Math.min(...vals)
+  const maxV = Math.max(...vals)
+  const span = Math.max(0.0001, maxV - minV)
+  const points = data.map((d, i) => {
+    const x = pad + (i / Math.max(1, data.length - 1)) * (w - pad * 2)
+    const y = h - pad - ((d.strategy - minV) / span) * (h - pad * 2)
+    return `${x},${y}`
+  }).join(' ')
+  return (
+    <svg viewBox={`0 0 ${w} ${h}`} style={{ width: '100%', height: 54, marginTop: 8 }}>
+      <polyline points={points} fill="none" stroke="#38bdf8" strokeWidth="2" />
+    </svg>
+  )
+}
+
 function EquityChart({ data }: { data: EquityPoint[] }) {
   if (!data.length) return <p style={{ color: '#94a3b8' }}>No chart data.</p>
 
@@ -231,6 +252,7 @@ export default async function Home({
   ])
 
   const primary = backtests[0]
+  const backtestBySymbol = new Map(backtests.map((b) => [b.symbol, b]))
 
   return (
     <main style={{
@@ -324,6 +346,7 @@ export default async function Home({
           <section style={{ marginTop: 14, display: 'grid', gridTemplateColumns: 'repeat(auto-fit,minmax(280px,1fr))', gap: 12 }}>
             {trends.map((t) => {
               const pill = outlookPill(t.up_probability)
+              const bt = backtestBySymbol.get(t.symbol)
               return (
                 <article key={t.symbol} style={{ border: '1px solid rgba(148,163,184,.25)', borderRadius: 14, padding: 14, background: 'linear-gradient(180deg, rgba(15,23,42,.75), rgba(2,6,23,.9))' }}>
                   <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
@@ -333,6 +356,8 @@ export default async function Home({
                   <p style={{ margin: '8px 0', fontSize: 28, fontWeight: 700 }}>{pct(t.up_probability)}</p>
                   <p style={{ margin: '4px 0', color: '#94a3b8' }}><strong style={{ color: '#cbd5e1' }}>Momentum:</strong> {t.momentum_score.toFixed(3)}</p>
                   <p style={{ margin: '4px 0', color: '#94a3b8' }}><strong style={{ color: '#cbd5e1' }}>Volatility:</strong> {t.volatility_regime}</p>
+                  {bt ? <p style={{ margin: '4px 0', color: '#94a3b8' }}><strong style={{ color: '#cbd5e1' }}>Alpha:</strong> <span style={{ color: numberColor(bt.alpha_vs_buy_hold) }}>{pct(bt.alpha_vs_buy_hold)}</span></p> : null}
+                  {bt ? <MiniTrendline data={bt.equity_curve} /> : null}
                   <ConfidenceBar value={t.up_probability} />
                   <p style={{ marginTop: 10, color: '#94a3b8', fontSize: 13 }}>{t.explanation}</p>
                 </article>
@@ -349,7 +374,7 @@ export default async function Home({
             <>
               <p><strong>Outlook:</strong> {explain.outlook} <span style={{ color: '#94a3b8' }}>({pct(explain.confidence)} confidence)</span></p>
               <p style={{ color: '#cbd5e1' }}>{explain.summary}</p>
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit,minmax(260px,1fr))', gap: 12 }}>
                 <div>
                   <p style={{ marginBottom: 6 }}><strong>Drivers</strong></p>
                   <ul>{explain.drivers.map((d, i) => <li key={i}>{d}</li>)}</ul>
@@ -425,6 +450,11 @@ export default async function Home({
             <p style={{ color: '#94a3b8' }}>No curve available.</p>
           )}
         </section>
+
+        <footer style={{ marginTop: 16, padding: '12px 4px', color: '#64748b', fontSize: 12, display: 'flex', justifyContent: 'space-between', flexWrap: 'wrap', gap: 8 }}>
+          <span>Crypto Trend Intelligence • Quant Research Desk</span>
+          <span>Signals are probabilistic and not financial advice.</span>
+        </footer>
       </div>
     </main>
   )
