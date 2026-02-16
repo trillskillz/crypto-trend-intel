@@ -65,6 +65,7 @@ type UniverseMeta = { total: number }
 type UniverseItem = { id: string; symbol: string; name: string }
 type Pins = { symbols: string[] }
 type MarketMode = 'all' | 'large-cap' | 'defi' | 'meme'
+type Health = { ok: boolean; service: string }
 
 const API_BASE = process.env.API_BASE_URL || 'http://127.0.0.1:8000'
 
@@ -115,6 +116,16 @@ async function getUniverseMeta(): Promise<UniverseMeta | null> {
     if (!r.ok) return null
     const j = await r.json()
     return { total: Number(j.total || 0) }
+  } catch {
+    return null
+  }
+}
+
+async function getHealth(): Promise<Health | null> {
+  try {
+    const r = await fetch(`${API_BASE}/health`, { cache: 'no-store' })
+    if (!r.ok) return null
+    return await r.json()
   } catch {
     return null
   }
@@ -311,7 +322,7 @@ export default async function Home({
   const symbols = [...pins.filter((p) => filtered.includes(p)), ...filtered.filter((s) => !pins.includes(s))]
   const activeSymbols = symbols.slice(0, safeActive)
 
-  const [trends, backtests, explain, sim, alerts, universe, universeMatches] = await Promise.all([
+  const [trends, backtests, explain, sim, alerts, universe, universeMatches, health] = await Promise.all([
     getTrends(safeRisk, activeSymbols),
     getBacktests(safeLookback, safeRisk, activeSymbols),
     getExplain('BTC', safeRisk),
@@ -319,6 +330,7 @@ export default async function Home({
     getAlerts(safeRisk, Math.min(300, safeActive * 3)),
     getUniverseMeta(),
     searchUniverse(q),
+    getHealth(),
   ])
 
   const sortedBacktests = [...backtests].sort((a, b) => {
@@ -344,8 +356,20 @@ export default async function Home({
             <h1 style={{ margin: '6px 0 8px', fontSize: 36 }}>Crypto Trend Intelligence</h1>
             <p style={{ margin: 0, color: '#94a3b8' }}>Professional signal terminal with backtests, risk controls, and execution simulation.</p>
           </div>
-          <div style={{ fontSize: 12, color: '#94a3b8' }}>Live profile: <strong style={{ color: '#e2e8f0' }}>{safeRisk}</strong></div>
+          <div style={{ display: 'grid', gap: 8, justifyItems: 'end' }}>
+            <div style={{ fontSize: 12, color: '#94a3b8' }}>Live profile: <strong style={{ color: '#e2e8f0' }}>{safeRisk}</strong></div>
+            <div style={{ ...statusPill, borderColor: health?.ok ? 'rgba(34,197,94,.4)' : 'rgba(239,68,68,.5)', color: health?.ok ? '#86efac' : '#fda4af' }}>
+              {health?.ok ? '● API Online' : '● API Offline'}
+            </div>
+          </div>
         </header>
+
+        <section style={{ marginTop: 12, display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+          <a href='?lookback=240&risk=conservative&capital=10000&active=24&sort=drawdown&mode=large-cap' style={presetChip}>Conservative • Large Caps</a>
+          <a href='?lookback=240&risk=moderate&capital=10000&active=24&sort=alpha&mode=all' style={presetChip}>Balanced • Best Alpha</a>
+          <a href='?lookback=120&risk=aggressive&capital=10000&active=50&sort=accuracy&mode=meme' style={presetChip}>Aggressive • Meme Momentum</a>
+          <a href='?lookback=360&risk=moderate&capital=10000&active=50&sort=alpha&mode=defi' style={presetChip}>DeFi Swing Setup</a>
+        </section>
 
         <section style={{ marginTop: 18, border: '1px solid rgba(148,163,184,.25)', borderRadius: 14, padding: 14, background: 'rgba(15,23,42,.5)', backdropFilter: 'blur(6px)' }}>
           <form style={{ display: 'flex', gap: 12, flexWrap: 'wrap', alignItems: 'end' }}>
@@ -484,7 +508,7 @@ export default async function Home({
 
         {trends.length === 0 ? (
           <p style={{ color: '#fda4af' }}>
-            API not reachable yet. Start backend: <code>uvicorn services.api.app.main:app --reload --port 8000</code>
+            No qualifying market data for the current selection. Try <strong>Mode: All</strong>, lower <strong>Live Analysis Size</strong>, or add more major symbols (BTC/ETH/SOL).
           </p>
         ) : (
           <section style={{ marginTop: 14, display: 'grid', gridTemplateColumns: 'repeat(auto-fit,minmax(280px,1fr))', gap: 12 }}>
@@ -641,4 +665,23 @@ const linkChip: CSSProperties = {
   color: '#93c5fd',
   textDecoration: 'none',
   fontSize: 12,
+}
+const presetChip: CSSProperties = {
+  display: 'inline-flex',
+  alignItems: 'center',
+  padding: '8px 10px',
+  borderRadius: 10,
+  border: '1px solid rgba(148,163,184,.3)',
+  textDecoration: 'none',
+  color: '#cbd5e1',
+  background: 'rgba(15,23,42,.55)',
+  fontSize: 12,
+}
+const statusPill: CSSProperties = {
+  border: '1px solid rgba(148,163,184,.35)',
+  borderRadius: 999,
+  padding: '4px 10px',
+  background: 'rgba(2,6,23,.75)',
+  fontSize: 12,
+  fontWeight: 600,
 }
