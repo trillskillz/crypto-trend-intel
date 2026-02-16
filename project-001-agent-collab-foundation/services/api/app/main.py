@@ -13,6 +13,7 @@ from pydantic import BaseModel
 app = FastAPI(title="Crypto Trend API", version="0.6.0")
 
 BINANCE_BASE_URL = "https://api.binance.com"
+COINBASE_BASE_URL = "https://api.exchange.coinbase.com"
 INTERVAL = "1h"
 LIMIT = 1000
 RiskProfile = Literal["conservative", "moderate", "aggressive"]
@@ -445,7 +446,13 @@ def _to_pair(symbol: str) -> str:
     return pair if pair.endswith("USDT") else f"{pair}USDT"
 
 
+def _coinbase_product(symbol: str) -> str:
+    base = symbol.upper().replace("USDT", "")
+    return f"{base}-USD"
+
+
 def _fetch_klines(symbol: str) -> list[dict]:
+    # Primary: Binance
     url = f"{BINANCE_BASE_URL}/api/v3/klines"
     params = {"symbol": symbol, "interval": INTERVAL, "limit": LIMIT}
     try:
@@ -453,10 +460,26 @@ def _fetch_klines(symbol: str) -> list[dict]:
             r = client.get(url, params=params)
             r.raise_for_status()
             raw = r.json()
-    except Exception as exc:  # pragma: no cover
-        raise HTTPException(status_code=502, detail=f"Market data fetch failed: {exc}") from exc
+        return [{"open_time": int(row[0]), "close": float(row[4])} for row in raw]
+    except Exception:
+        pass
 
-    return [{"open_time": int(row[0]), "close": float(row[4])} for row in raw]
+    # Fallback: Coinbase candles (public)
+    product = _coinbase_product(symbol)
+    cb_url = f"{COINBASE_BASE_URL}/products/{product}/candles"
+    cb_params = {"granularity": 3600}
+    try:
+        with httpx.Client(timeout=12.0) as client:
+            r = client.get(cb_url, params=cb_params)
+            r.raise_for_status()
+            raw = r.json()
+        if not raw:
+            raise ValueError("No candles in Coinbase response")
+        # Coinbase returns newest-first: [time, low, high, open, close, volume]
+        raw_sorted = sorted(raw, key=lambda x: x[0])
+        return [{"open_time": int(row[0]) * 1000, "close": float(row[4])} for row in raw_sorted]
+    except Exception as exc:  # pragma: no cover
+        raise HTTPException(status_code=502, detail=f"Market data fetch failed (Binance+Coinbase): {exc}") from exc
 
 
 def _momentum_score(closes: list[float]) -> float:
