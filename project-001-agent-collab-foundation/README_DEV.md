@@ -13,5 +13,6 @@
 5. pip install -r services/api/requirements.txt -r services/models/requirements.txt -r services/ingest/requirements.txt
 
 ## Run
-- Web: `npm run dev --prefix apps/web`
+- Ingest sample market data: `python services/ingest/run_ingest.py`
 - API: `uvicorn services.api.app.main:app --reload --port 8000`
+- Web: `npm run dev --prefix apps/web`
