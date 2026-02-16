@@ -14,6 +14,7 @@ app = FastAPI(title="Crypto Trend API", version="0.6.0")
 
 BINANCE_BASE_URL = "https://api.binance.com"
 COINBASE_BASE_URL = "https://api.exchange.coinbase.com"
+COINGECKO_BASE_URL = "https://api.coingecko.com/api/v3"
 INTERVAL = "1h"
 LIMIT = 1000
 RiskProfile = Literal["conservative", "moderate", "aggressive"]
@@ -21,6 +22,7 @@ RiskProfile = Literal["conservative", "moderate", "aggressive"]
 STATE_DIR = Path(__file__).resolve().parents[1] / "state"
 WATCHLIST_FILE = STATE_DIR / "watchlist.json"
 ALERTS_FILE = STATE_DIR / "alerts_state.json"
+COINGECKO_UNIVERSE_FILE = STATE_DIR / "coingecko_universe.json"
 
 
 class TrendResponse(BaseModel):
@@ -96,6 +98,19 @@ class AlertsCheckResponse(BaseModel):
     flips: list[AlertFlip]
 
 
+class CoinUniverseItem(BaseModel):
+    id: str
+    symbol: str
+    name: str
+
+
+class CoinUniverseResponse(BaseModel):
+    total: int
+    offset: int
+    limit: int
+    items: list[CoinUniverseItem]
+
+
 @app.get("/health")
 def health():
     return {"ok": True, "service": "crypto-trend-api"}
@@ -124,15 +139,50 @@ def remove_watchlist(symbol: str):
     return WatchlistResponse(symbols=current)
 
 
+@app.post("/v1/watchlist/import/coingecko", response_model=WatchlistResponse)
+def import_watchlist_from_coingecko(refresh: bool = Query(default=False)):
+    coins = _load_coingecko_universe(refresh=refresh)
+    symbols = [_to_pair(c.get("symbol", "")) for c in coins if c.get("symbol")]
+    _save_watchlist(symbols)
+    return WatchlistResponse(symbols=_load_watchlist())
+
+
+@app.get("/v1/universe/coingecko", response_model=CoinUniverseResponse)
+def universe_coingecko(
+    search: str = Query(default=""),
+    offset: int = Query(default=0, ge=0),
+    limit: int = Query(default=200, ge=1, le=2000),
+    refresh: bool = Query(default=False),
+):
+    coins = _load_coingecko_universe(refresh=refresh)
+    q = search.strip().lower()
+    if q:
+        coins = [
+            c for c in coins
+            if q in c.get("id", "").lower() or q in c.get("symbol", "").lower() or q in c.get("name", "").lower()
+        ]
+
+    total = len(coins)
+    window = coins[offset : offset + limit]
+    items = [CoinUniverseItem(id=c["id"], symbol=c["symbol"], name=c["name"]) for c in window]
+    return CoinUniverseResponse(total=total, offset=offset, limit=limit, items=items)
+
+
 @app.get("/v1/alerts/check", response_model=AlertsCheckResponse)
-def alerts_check(risk: RiskProfile = Query(default="moderate")):
-    symbols = _load_watchlist()
+def alerts_check(
+    risk: RiskProfile = Query(default="moderate"),
+    max_symbols: int = Query(default=200, ge=1, le=2000),
+):
+    symbols = _load_watchlist()[:max_symbols]
     prev = _load_json(ALERTS_FILE, default={})
     flips: list[AlertFlip] = []
     next_state: dict[str, str] = {}
 
     for symbol in symbols:
-        t = trend(symbol, risk=risk)
+        try:
+            t = trend(symbol, risk=risk)
+        except HTTPException:
+            continue
         now = _outlook_from_probability(t.up_probability)
         old = prev.get(symbol)
         if old and old != now:
@@ -185,7 +235,16 @@ def trend_batch(
     symbols: str = "BTC,ETH,SOL",
     risk: RiskProfile = Query(default="moderate"),
 ):
-    return [trend(s.strip(), risk=risk) for s in symbols.split(",") if s.strip()]
+    out = []
+    for s in symbols.split(","):
+        s = s.strip()
+        if not s:
+            continue
+        try:
+            out.append(trend(s, risk=risk))
+        except HTTPException:
+            continue
+    return out
 
 
 @app.get("/v1/backtest/{symbol}", response_model=BacktestResponse)
@@ -269,7 +328,16 @@ def backtest_batch(
     lookback: int = Query(default=240, ge=120, le=900),
     risk: RiskProfile = Query(default="moderate"),
 ):
-    return [backtest(s.strip(), lookback=lookback, risk=risk) for s in symbols.split(",") if s.strip()]
+    out = []
+    for s in symbols.split(","):
+        s = s.strip()
+        if not s:
+            continue
+        try:
+            out.append(backtest(s, lookback=lookback, risk=risk))
+        except HTTPException:
+            continue
+    return out
 
 
 @app.get("/v1/explain/{symbol}", response_model=ExplainResponse)
@@ -412,6 +480,33 @@ def _load_json(path: Path, default):
 def _save_json(path: Path, data) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+
+
+def _load_coingecko_universe(refresh: bool = False) -> list[dict]:
+    cached = _load_json(COINGECKO_UNIVERSE_FILE, default=[])
+    if cached and not refresh:
+        return cached
+
+    url = f"{COINGECKO_BASE_URL}/coins/list"
+    params = {"include_platform": "false"}
+    try:
+        with httpx.Client(timeout=20.0) as client:
+            r = client.get(url, params=params)
+            r.raise_for_status()
+            raw = r.json()
+        cleaned = [
+            {
+                "id": str(c.get("id", "")).strip(),
+                "symbol": str(c.get("symbol", "")).strip().lower(),
+                "name": str(c.get("name", "")).strip(),
+            }
+            for c in raw
+            if c.get("id") and c.get("symbol") and c.get("name")
+        ]
+        _save_json(COINGECKO_UNIVERSE_FILE, cleaned)
+        return cleaned
+    except Exception:
+        return cached if cached else []
 
 
 def _load_watchlist() -> list[str]:

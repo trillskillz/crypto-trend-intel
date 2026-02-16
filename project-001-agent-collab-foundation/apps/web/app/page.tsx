@@ -61,10 +61,14 @@ type PortfolioSim = {
 type Watchlist = { symbols: string[] }
 type AlertFlip = { symbol: string; from_outlook: string; to_outlook: string; up_probability: number }
 type AlertsCheck = { checked_at: string; risk_profile: Risk; flips: AlertFlip[] }
+type UniverseMeta = { total: number }
 
 const API_BASE = process.env.API_BASE_URL || 'http://127.0.0.1:8000'
 
-async function mutateWatchlist(addSymbol?: string, removeSymbol?: string) {
+async function mutateWatchlist(addSymbol?: string, removeSymbol?: string, importAll?: string) {
+  if (importAll === '1') {
+    await fetch(`${API_BASE}/v1/watchlist/import/coingecko`, { method: 'POST', cache: 'no-store' })
+  }
   if (addSymbol) {
     await fetch(`${API_BASE}/v1/watchlist/${encodeURIComponent(addSymbol)}`, { method: 'POST', cache: 'no-store' })
   }
@@ -80,6 +84,17 @@ async function getWatchlist(): Promise<Watchlist> {
     return await r.json()
   } catch {
     return { symbols: ['BTCUSDT', 'ETHUSDT', 'SOLUSDT'] }
+  }
+}
+
+async function getUniverseMeta(): Promise<UniverseMeta | null> {
+  try {
+    const r = await fetch(`${API_BASE}/v1/universe/coingecko?limit=1`, { cache: 'no-store' })
+    if (!r.ok) return null
+    const j = await r.json()
+    return { total: Number(j.total || 0) }
+  } catch {
+    return null
   }
 }
 
@@ -230,7 +245,7 @@ function Kpi({ label, value, sub }: { label: string; value: string; sub?: string
 export default async function Home({
   searchParams,
 }: {
-  searchParams?: { lookback?: string; risk?: string; capital?: string; addSymbol?: string; removeSymbol?: string }
+  searchParams?: { lookback?: string; risk?: string; capital?: string; addSymbol?: string; removeSymbol?: string; importAll?: string }
 }) {
   const lookback = Number(searchParams?.lookback || '240')
   const safeLookback = [120, 240, 360, 720].includes(lookback) ? lookback : 240
@@ -239,16 +254,18 @@ export default async function Home({
   const capital = Number(searchParams?.capital || '10000')
   const safeCapital = Number.isFinite(capital) && capital >= 100 ? capital : 10000
 
-  await mutateWatchlist(searchParams?.addSymbol, searchParams?.removeSymbol)
+  await mutateWatchlist(searchParams?.addSymbol, searchParams?.removeSymbol, searchParams?.importAll)
   const watchlist = await getWatchlist()
   const symbols = watchlist.symbols.length ? watchlist.symbols : ['BTCUSDT', 'ETHUSDT', 'SOLUSDT']
+  const activeSymbols = symbols.slice(0, 24)
 
-  const [trends, backtests, explain, sim, alerts] = await Promise.all([
-    getTrends(safeRisk, symbols),
-    getBacktests(safeLookback, safeRisk, symbols),
+  const [trends, backtests, explain, sim, alerts, universe] = await Promise.all([
+    getTrends(safeRisk, activeSymbols),
+    getBacktests(safeLookback, safeRisk, activeSymbols),
     getExplain('BTC', safeRisk),
     getPortfolioSim('BTC', safeRisk, Math.max(240, safeLookback), safeCapital),
     getAlerts(safeRisk),
+    getUniverseMeta(),
   ])
 
   const primary = backtests[0]
@@ -303,25 +320,31 @@ export default async function Home({
         </section>
 
         <section style={{ marginTop: 14, display: 'grid', gridTemplateColumns: 'repeat(auto-fit,minmax(220px,1fr))', gap: 10 }}>
-          <Kpi label="Tracked Symbols" value={String(symbols.length)} sub={symbols.join(', ')} />
+          <Kpi label="Tracked Symbols" value={String(symbols.length)} sub={symbols.slice(0, 8).join(', ') + (symbols.length > 8 ? '…' : '')} />
           <Kpi label="Backtest Window" value={`${safeLookback}h`} sub="rolling evaluation" />
+          <Kpi label="CoinGecko Universe" value={universe ? universe.total.toLocaleString() : 'n/a'} sub="total listed assets" />
           <Kpi label="Alert Flips" value={String(alerts?.flips.length ?? 0)} sub={alerts?.checked_at ? `last check ${new Date(alerts.checked_at).toLocaleTimeString()}` : 'n/a'} />
           <Kpi label="Portfolio PnL" value={sim ? pct(sim.pnl_pct) : 'n/a'} sub={sim ? `Final: $${sim.final_equity.toLocaleString()}` : 'simulator unavailable'} />
         </section>
 
         <section style={{ marginTop: 14, border: '1px solid rgba(148,163,184,.25)', borderRadius: 14, padding: 14, background: 'rgba(15,23,42,.5)' }}>
           <h2 style={h2}>Watchlist</h2>
-          <p style={{ marginTop: 0, color: '#94a3b8' }}>{symbols.join(' • ')}</p>
+          <p style={{ marginTop: 0, color: '#94a3b8' }}>
+            {symbols.length.toLocaleString()} symbols loaded • analyzing first {activeSymbols.length} for live panels
+          </p>
+          <p style={{ marginTop: 0, color: '#64748b', fontSize: 12 }}>{symbols.slice(0, 30).join(' • ')}{symbols.length > 30 ? ' …' : ''}</p>
           <form style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
             <input name="addSymbol" placeholder="Add symbol (ADA, XRP, BNB...)" style={inputStyle} />
             <input type="hidden" name="lookback" value={safeLookback} />
             <input type="hidden" name="risk" value={safeRisk} />
             <input type="hidden" name="capital" value={safeCapital} />
             <button type="submit" style={primaryButton}>Add</button>
+            <a href={`?lookback=${safeLookback}&risk=${safeRisk}&capital=${safeCapital}&importAll=1`} style={{ ...primaryButton, textDecoration: 'none', display: 'inline-flex', alignItems: 'center' }}>Import all from CoinGecko</a>
           </form>
+          <p style={{ marginTop: 8, marginBottom: 6, color: '#94a3b8', fontSize: 12 }}>Tip: importing the full universe is huge and can slow trend/alert refreshes.</p>
           <div style={{ marginTop: 10, color: '#94a3b8', fontSize: 13 }}>
             Remove:&nbsp;
-            {symbols.map((s) => (
+            {symbols.slice(0, 20).map((s) => (
               <a key={s} href={`?lookback=${safeLookback}&risk=${safeRisk}&capital=${safeCapital}&removeSymbol=${s.replace('USDT', '')}`} style={linkChip}>{s}</a>
             ))}
           </div>
