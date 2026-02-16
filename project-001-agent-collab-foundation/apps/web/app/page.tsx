@@ -317,7 +317,7 @@ function AllocationBars({ items }: { items: Array<{ symbol: string; weight: numb
 export default async function Home({
   searchParams,
 }: {
-  searchParams?: { lookback?: string; risk?: string; capital?: string; addSymbol?: string; removeSymbol?: string; importAll?: string; q?: string; active?: string; sort?: string; mode?: string; pin?: string; unpin?: string }
+  searchParams?: { lookback?: string; risk?: string; capital?: string; addSymbol?: string; removeSymbol?: string; importAll?: string; q?: string; active?: string; sort?: string; mode?: string; pin?: string; unpin?: string; rebalance?: string; maxW?: string; minW?: string }
 }) {
   const lookback = Number(searchParams?.lookback || '240')
   const safeLookback = [120, 240, 360, 720].includes(lookback) ? lookback : 240
@@ -330,6 +330,9 @@ export default async function Home({
   const q = (searchParams?.q || '').trim()
   const sort = (searchParams?.sort || 'alpha') as 'alpha' | 'accuracy' | 'drawdown'
   const mode = ((searchParams?.mode || 'all') as MarketMode)
+  const rebalance = (searchParams?.rebalance || 'neutral') as 'risk-on' | 'neutral' | 'defense'
+  const maxW = Math.min(0.6, Math.max(0.05, Number(searchParams?.maxW || '0.3')))
+  const minW = Math.min(0.2, Math.max(0, Number(searchParams?.minW || '0.02')))
 
   await mutateWatchlist(searchParams?.addSymbol, searchParams?.removeSymbol, searchParams?.importAll)
   await mutatePins(searchParams?.pin, searchParams?.unpin)
@@ -361,10 +364,18 @@ export default async function Home({
   const backtestBySymbol = new Map(sortedBacktests.map((b) => [b.symbol, b]))
   const alphaPositive = sortedBacktests.filter((b) => b.alpha_vs_buy_hold > 0).slice(0, 8)
   const alphaSum = alphaPositive.reduce((s, x) => s + x.alpha_vs_buy_hold, 0)
-  const alloc = alphaPositive.map((x) => ({
+  const riskMult = rebalance === 'risk-on' ? 1.2 : rebalance === 'defense' ? 0.8 : 1
+  let alloc = alphaPositive.map((x) => ({
     symbol: x.symbol,
     alpha: x.alpha_vs_buy_hold,
-    weight: alphaSum > 0 ? x.alpha_vs_buy_hold / alphaSum : 0,
+    weight: (alphaSum > 0 ? x.alpha_vs_buy_hold / alphaSum : 0) * riskMult,
+  }))
+  alloc = alloc.map((x) => ({ ...x, weight: Math.max(minW, Math.min(maxW, x.weight)) }))
+  const norm = alloc.reduce((s, x) => s + x.weight, 0) || 1
+  alloc = alloc.map((x) => ({ ...x, weight: x.weight / norm }))
+  const pnlAttribution = alloc.map((a) => ({
+    ...a,
+    estPnl: a.weight * (sortedBacktests.find((b) => b.symbol === a.symbol)?.strategy_return ?? 0),
   }))
   const rebalanceNotes = [
     sortedBacktests.find((b) => b.max_drawdown < -0.2) ? 'Reduce exposure to high drawdown names (>20% DD).' : 'Drawdowns look contained for current window.',
@@ -615,9 +626,31 @@ export default async function Home({
         <section style={{ marginTop: 14, border: '1px solid rgba(148,163,184,.25)', borderRadius: 14, padding: 14, background: 'rgba(15,23,42,.5)' }}>
           <h2 style={h2}>Suggested Allocation (Alpha-Weighted)</h2>
           <p style={{ marginTop: 0, color: '#94a3b8' }}>Model-driven draft allocation across top positive-alpha symbols. Rebalance manually with your own risk limits.</p>
+          <form style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 10 }}>
+            <input type="hidden" name="lookback" value={safeLookback} />
+            <input type="hidden" name="risk" value={safeRisk} />
+            <input type="hidden" name="capital" value={safeCapital} />
+            <input type="hidden" name="active" value={safeActive} />
+            <input type="hidden" name="sort" value={sort} />
+            <input type="hidden" name="mode" value={mode} />
+            <label style={{ display: 'grid', gap: 4 }}><span style={{ fontSize: 12, color: '#94a3b8' }}>Rebalance Preset</span><select name="rebalance" defaultValue={rebalance} style={inputStyle}><option value="risk-on">Risk-On</option><option value="neutral">Neutral</option><option value="defense">Defense</option></select></label>
+            <label style={{ display: 'grid', gap: 4 }}><span style={{ fontSize: 12, color: '#94a3b8' }}>Max Weight</span><input name="maxW" type="number" step="0.01" min="0.05" max="0.6" defaultValue={maxW} style={inputStyle} /></label>
+            <label style={{ display: 'grid', gap: 4 }}><span style={{ fontSize: 12, color: '#94a3b8' }}>Min Weight</span><input name="minW" type="number" step="0.01" min="0" max="0.2" defaultValue={minW} style={inputStyle} /></label>
+            <button type="submit" style={primaryButton}>Apply Allocation</button>
+          </form>
           <AllocationBars items={alloc} />
           <div style={{ marginTop: 10, display: 'grid', gap: 4 }}>
             {rebalanceNotes.map((n, i) => <p key={i} style={{ margin: 0, color: '#94a3b8', fontSize: 13 }}>• {n}</p>)}
+          </div>
+          <h3 style={{ marginTop: 14, marginBottom: 8 }}>PnL Attribution (Estimated)</h3>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit,minmax(220px,1fr))', gap: 8 }}>
+            {pnlAttribution.map((p) => (
+              <div key={p.symbol} style={{ border: '1px solid rgba(148,163,184,.2)', borderRadius: 10, padding: 10, background: 'rgba(2,6,23,.5)' }}>
+                <strong>{p.symbol}</strong>
+                <div style={{ color: '#94a3b8', fontSize: 12 }}>Weight {(p.weight * 100).toFixed(1)}%</div>
+                <div style={{ color: numberColor(p.estPnl), fontWeight: 700 }}>{pct(p.estPnl)} est contribution</div>
+              </div>
+            ))}
           </div>
         </section>
 
